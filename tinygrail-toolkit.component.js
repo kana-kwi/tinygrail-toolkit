@@ -122,7 +122,8 @@
  *        按钮行不再靠固定 id / 精确文案找，按可见按钮 + 同行动词定位，
  *        React 重绘立刻重贴，不会被抹掉
  *      + 圣殿列表头「固定资产 N」后面补各级圣殿数量 (3级 + 2级 + 1级)
- *      + 竞拍弹窗的数量默认改成 1 股（站点默认是整座英灵殿）；
+ *      + 竞拍弹窗的数量默认「我已经拍过的股数」，没参与过才是 1 股
+ *        （站点默认是整座英灵殿）；缓存还没就绪时先按 1 股，数据回来后自动补正；
  *        补满 / 改量 / 改价 新版自己就有，插件不再重复加
  *      + 圣殿尺寸「小」= 一行 6 个；规则改按 id 注入样式表（不再打在会被
  *        React 换掉的节点属性上），点塔图重绘也不会闪回一行 5 个
@@ -201,7 +202,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.11（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.13（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -10864,7 +10865,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     if (span.textContent !== text) span.textContent = text;
   }
 
-  /** 新版竞拍弹窗：数量默认 1 股。
+  /** 竞拍弹窗对应的角色：标题是「拍卖 - #36488「凉风青叶」」 */
+  function gxBidCid(modal) {
+    try {
+      const head = String(modal.textContent || '').slice(0, 120);
+      const m = head.match(/#\s*(\d{2,9})/);
+      if (m) return m[1];
+    } catch (e) {}
+    return String(currentCharacterId() || '');
+  }
+
+  /** 新版竞拍弹窗：数量默认「我已经拍过的股数」，没参与过才用设定值（默认 1 股）。
+   *  站点默认把「英灵殿全部」塞进数量框，一股脑全拍太冲；
+   *  已经拍过 100 股时再点拍卖，默认值给 100 更顺手（改量时不用自己回忆）。
    *  补满 / 改量 / 改价 新版小圣杯自己已经提供了，插件不再重复造这三颗按钮。 */
   function gxNewBidModal() {
     for (const doc of allDocs()) {
@@ -10877,12 +10890,27 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const stale = modal.querySelector('#tgtk-gxq');
       if (stale) stale.remove();
       const amountIn = modal.querySelector('#tg-auction-amount-input');
-      if (!amountIn) continue;
-      // 站点默认把「英灵殿全部」塞进数量框，一股脑全拍太冲 → 首次打开改成设定值（默认 1 股）
-      if (!amountIn.dataset.tgtkInit) {
-        amountIn.dataset.tgtkInit = '1';
-        const dft = Math.max(1, Math.floor(num(S.gxBidAmount) || 1));
-        if (Number(amountIn.value) !== dft) gxSetInput(amountIn, String(dft));
+      if (!amountIn || amountIn.dataset.tgtkInit) continue;
+
+      amountIn.dataset.tgtkInit = '1';
+      const cid = gxBidCid(modal);
+      const cached = cid ? GX.cache['n' + cid] : null;
+      const mine = cached && cached.bid ? Math.max(0, Math.floor(num(cached.bid.amount))) : 0;
+      const dft = mine > 0 ? mine : Math.max(1, Math.floor(num(S.gxBidAmount) || 1));
+      amountIn.dataset.tgtkDft = String(dft);
+      if (Number(amountIn.value) !== dft) gxSetInput(amountIn, String(dft));
+
+      // 缓存还没就绪（刚进角色页就点开竞拍）：补一次，回来时用户没改过数量再跟着更新
+      if (!cached && cid) {
+        gxNewData(cid)
+          .then((d) => {
+            const m2 = d && d.bid ? Math.max(0, Math.floor(num(d.bid.amount))) : 0;
+            if (m2 <= 0 || !amountIn.isConnected) return;
+            if (String(amountIn.value) !== String(amountIn.dataset.tgtkDft || '')) return;
+            amountIn.dataset.tgtkDft = String(m2);
+            gxSetInput(amountIn, String(m2));
+          })
+          .catch(() => {});
       }
     }
   }
@@ -16453,7 +16481,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.13（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
