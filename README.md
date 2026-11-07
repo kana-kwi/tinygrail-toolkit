@@ -11,6 +11,8 @@ Bangumi「小圣杯」的单文件超合金组件，新旧两版页面通用。�
 1. 打开 Bangumi 的「超合金组件」页面，新建 / 编辑组件；
 2. 添加新版本，版本号填 `2.3.13`（每次升级 +0.0.1，不能重复）；
 3. 把 `tinygrail-toolkit.component.js` 的全部内容粘进「脚本」框，创建；
+   > 嫌长的话可以改用 [`dist/tinygrail-toolkit.component.paste.js`](./dist/tinygrail-toolkit.component.paste.js)：
+   > 同一份代码，只是去掉了注释和空行（16,570 行 → 14,834 行），粘贴、审核都轻一些。
 4. 启用组件，刷新小圣杯页面，右下角出现「工具箱」浮窗（快捷键 `Alt+T`）。
 
 > 兼容旧版 / 新版小圣杯及 iframe 嵌入页面。停用组件会清掉云设置里的那份数据，重要配置建议另存一份同步码。
@@ -40,7 +42,9 @@ Bangumi「小圣杯」的单文件超合金组件，新旧两版页面通用。�
 
 ## 文件
 
-- `tinygrail-toolkit.component.js` —— 组件本体（直接使用）
+- `tinygrail-toolkit.component.js` —— 组件本体（直接使用，带完整说明注释）
+- `dist/tinygrail-toolkit.component.paste.js` —— 精简版（去注释 / 空行，代码完全相同），适合提交组件审核时粘贴
+- `scripts/make-paste.js` —— 由主文件生成精简版的脚本（`node scripts/make-paste.js`）
 - `docs/intro-and-post.md` —— 组件简介 + 小组介绍帖（BBCode，可直接粘贴）
 - `LICENSE` —— MIT
 
