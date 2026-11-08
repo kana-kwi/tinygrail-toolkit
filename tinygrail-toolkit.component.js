@@ -31,13 +31,20 @@
  *      「收藏」页 →「跨设备同步」里的「导入小圣杯收藏」按 tinygrail:favorites 的夹结构精确解析，
  *      自动跳过未上市与无效角色；同时兼容小圣杯 2.0 之前的旧版组件（#grailBox jQuery 页面）与新版 React 页面
  *   5) 道具：一键连用「混沌魔方」「虚空道标」「鲤鱼之眼」，可设炮塔、目标与执行次数
+ *      「次数」三种道具各存各的（每日上限本来就不同：魔方 3 / 道标 5 / 鲤鱼之眼 1），
+ *      改一种不会连带改到另外两种，切回来还是上次填的数
  *      两发之间留 1.5 秒以上随机间隔，避免被服务端节流；撞到每日次数上限立刻中断整批
  *      失败后回查圣殿固资，区分「次数用完」与「真的缺钱」（服务端两种情况同一句文案）
  *      固资不足时可自动献祭「炮塔角色自己」的持股补塔（默认关闭），
- *      「单次献祭」= 每次实际烧掉的股数，补不够自动再补一轮，直到够跑完这一批
+ *      判「够不够用」按站点门槛：炮塔固资 ≥ 250 才发得动道具（低于 250 服务端也回「次数用完」）
+ *      「单次献祭」= 每轮实际烧掉的股数，补不够自动再补一轮，直到够跑完这一批；
+ *      留空则按缺口自动算股数（1 股补 2 固资，奇数向上取整）
+ *      献祭一律不越过塔上限：到上限就停，宁可差 1 点也不把上限撑高
+ *      （上限一涨，之后每献 1 股只能换 1 固资，等于亏一半）
  *      + 一键冲星：给每个角色贡献指定「数量」的星之力（1 固资 = 1 星之力），
  *        与它当前已有多少星之力无关；支持一次填多个角色，固资不够可自动献祭补充。
  *        每批自动按这座塔的固资上限切分（不用手填单次），收尾可选「补满 / 补到 250 / 不补」，
+ *        同样不越过上限：237 固资、500 上限时收尾只补到 499（献 131 股），不会撑成 501；
  *        补到 250 是给「只留 250 固资、避免被虚空道标打中」的玩法准备的；
  *        「预计消耗活股」会先读塔里当前的固资，按真实余量算，不是按上限瞎估
  *      + 星光碎片：填目标塔 ID 后自动列出自己的全部持仓，按持股从多到少排列（默认最多 100 只）；
@@ -202,7 +209,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.13（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.17（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -396,7 +403,8 @@
     magic: 'chaos',
     mFrom: '',
     mTo: '',
-    mTimes: 1,
+    // 三种道具的每日上限不同（魔方 3 / 道标 5 / 鲤鱼之眼 1），次数各存各的，互不影响
+    mTimesBy: { chaos: 1, guidepost: 1, fisheye: 1 },
     mStop: true,
     mFill: false, // 固资不足时自动献祭补充
     mFillMax: 300, // 每次自动补充时一次性献祭多少股（不再当上限用）
@@ -480,6 +488,21 @@
   }
   // 竞拍默认数量：旧默认值是 50，站点本身默认 1，统一按 1 走（用户手动改过别的值就不动）
   if (Number(S.gxBidAmount) === 50) S.gxBidAmount = 1;
+  // 道具次数：从「三种道具共用一个 mTimes」拆成 mTimesBy 各存各的。
+  // 老设置里那个数原样复制给三种道具，之后各改各的，不再互相牵连。
+  if (!SAVED.mTimesBy || typeof SAVED.mTimesBy !== 'object') {
+    const legacy = Math.max(1, Math.min(50, Math.floor(Number(SAVED.mTimes) || 1)));
+    S.mTimesBy = { chaos: legacy, guidepost: legacy, fisheye: legacy };
+  }
+  {
+    const by = S.mTimesBy && typeof S.mTimesBy === 'object' ? S.mTimesBy : {};
+    S.mTimesBy = {
+      chaos: Math.max(1, Math.min(50, Math.floor(Number(by.chaos) || 1))),
+      guidepost: Math.max(1, Math.min(50, Math.floor(Number(by.guidepost) || 1))),
+      fisheye: Math.max(1, Math.min(50, Math.floor(Number(by.fisheye) || 1))),
+    };
+  }
+  delete S.mTimes;
   // 筛塔：「显示全部」取消，改成「固定资产」「塔图」两个勾选。
   // 老设置的语义照搬过来：原来没勾显示全部 = 按固定资产筛；塔图选了具体的 = 勾上塔图条件。
   if (SAVED.filAssets === undefined) S.filAssets = !SAVED.showAll;
@@ -3971,13 +3994,19 @@
     },
   };
 
+  /** 某种道具记着的执行次数（三种道具各存各的：每日上限 3 / 5 / 1 本来就不一样） */
+  function magicTimes(mode) {
+    const by = S.mTimesBy || {};
+    return Math.max(1, Math.min(50, Math.floor(num(by[mode]) || 1)));
+  }
+
   /** 更新「预计消耗」提示。角色名没缓到时异步补一次，补到后重绘，
    *  让炮塔 / 目标直接手打 ID 也能显示名字（不用先去收藏夹里点一遍）。 */
   const magicNameTried = new Map(); // id → 上次补名时间；失败时限流重试，不永久放弃
   function refreshMagicPreview() {
     if (!els || !els.mPreview) return;
     const def = MAGIC_DEFS[S.magic];
-    const n = Math.max(1, Math.min(50, Math.floor(num(S.mTimes) || 1)));
+    const n = magicTimes(S.magic);
     const cost = def.cost;
     const from = parseCharId(S.mFrom);
     const to = def.needTarget ? parseCharId(S.mTo) : from;
@@ -4090,18 +4119,62 @@
   }
 
   /**
+   * 站点要求炮塔固资 ≥ 250 才能使用道具：低于 250 时接口统一回
+   * 「今日已超过使用次数限制或资产不足」，看着像次数用完，其实一次都没用掉。
+   * 所以「够不够用」一律按 250 这个下限判，而不是只看单次消耗（魔方 10 / 道标 100）。
+   *
+   * 相关前提（用户 2026-11 补充）：塔的固资上限最低是 500——上限到 500 才算建成 1 级圣殿，
+   * 只有建成的圣殿才能用道具。所以「上限 < 500」的塔在站点上不存在，
+   * 下面的补资也永远够得着 250，不会出现「想补但上限不够用道具门槛」的情况。
+   */
+  const MAGIC_MIN_FA = 250;
+
+  /**
+   * 补 gap 点固资需要献祭多少股。
+   * 规则（用户 2026-11 确认）：
+   *   · 固资没到上限时，1 股 = +2 固资；差额是奇数就向上取整（献祭不了半股）：差 37 → 19 股；
+   *   · **绝不越过上限**：顶到上限后再献 1 股只能换 1 固资 + 1 上限，等于把上限白白撑高，
+   *     强迫症玩家受不了（500 上限、237 固资要补满，献 132 股会让上限变 501）。
+   *     所以先按 2 固资一档往下退，宁可停在 499，也不去动上限。
+   *   · 已经在上限上（或只差 1 点，再献就破限）→ 返回 0，不补。
+   */
+  function sharesForGap(gap, assets, ceiling) {
+    const g = Math.floor(num(gap));
+    const a = Math.floor(num(assets));
+    const c = Math.floor(num(ceiling));
+    if (g <= 0) return 0;
+    if (!(c > 0)) return Math.ceil(g / 2); // 上限读不到：当没上限，按 2 固资/股
+    if (a >= c) return 0; // 已到上限：再献就是拿 2 股换 2 固资 2 上限，亏，不补
+    const room = c - a; // 还能涨多少固资而不破限
+    const usable = room - (room % 2); // 2 固资一档，奇数那 1 点宁可留着
+    return Math.ceil(Math.min(g, usable) / 2);
+  }
+
+  /** 不破上限的前提下最多能献多少股（上限未知返回 Infinity） */
+  function maxSharesBeforeCap(assets, ceiling) {
+    const a = Math.floor(num(assets));
+    const c = Math.floor(num(ceiling));
+    if (!(c > 0)) return Infinity;
+    const room = c - a;
+    if (!(room > 1)) return 0; // 已到上限，或只差 1 点（再献就破限）
+    return Math.floor(room / 2);
+  }
+
+  /**
    * 固资不足时献祭「炮塔角色自己的持股」补塔。
    * 献祭只能补同一个角色的圣殿，所以来源固定是炮塔角色本身。
    *
-   * 口径（2026-11 用户指定）：设置项是「每次一次性献祭多少股」，不是上限。
-   * 以前按缺口反推股数（缺口 100 → 只献 50 股），用户填 300 却只烧 50，
-   * 补到 300 就以为够了，结果跑到第 2 发又缺钱，看起来像功能没生效。
-   * 现在每次固定献 S.mFillMax 股，不够就再来一轮，直到固资够用 / 持股不足 / 轮数用完。
+   * 口径（2026-11 用户指定）：
+   *   · 「单次献祭」填了数字 = 每轮固定烧这么多股，不够就再来一轮；
+   *   · 留空 = 按缺口自动算股数（1 股 ≈ 2 固资），差多少补多少，不会一次多烧一堆；
+   *   · 两种模式都**不许越过塔上限**：献祭到「再献就破限」就停，
+   *     宁可差 1 点固资，也不把上限撑高 1 点（上限一涨，后面每献 1 股都只值 1 固资）。
    * 返回补充后的固资；失败返回 null。
    */
   async function fillAssets(cid, need, log) {
     const name = charaName(cid);
-    const per = Math.max(1, Math.floor(num(S.mFillMax) || 300));
+    const rawPer = Math.floor(num(S.mFillMax) || 0);
+    const auto = !(rawPer > 0); // 留空 / 0 → 按缺口算股数
     let temple = await myTemple(cid);
     if (!temple) {
       log('warn', (await selfKey()) ? '读取不到你的这座圣殿，跳过自动补充' : '读不到登录用户名（未登录小圣杯？），跳过自动补充');
@@ -4109,17 +4182,30 @@
     }
 
     let assets = num(temple.Assets);
+    let ceiling = num(temple.Sacrifices);
     // 固资够用时不献祭，但要留一行日志：不然用户看不到这段逻辑到底跑没跑，
     // 会误以为「自动献祭补充」没生效。
+    // 注意 need 现在至少是 MAGIC_MIN_FA（250）：站点低于 250 一次都用不了，
+    // 以前拿「单次消耗」当门槛，213 固资配 10 固资的魔方会被判成「够用」，一发都发不出去。
     if (assets >= need) {
-      log('info', `「${name}」固资 ${fmt(assets)} ≥ 预计所需 ${fmt(need)}，无需献祭`);
+      log('info', `「${name}」固资 ${fmt(assets)} ≥ 本批所需 ${fmt(need)}（站点要求至少 ${fmt(MAGIC_MIN_FA)}），无需献祭`);
       return assets;
     }
 
-    const ceiling = num(temple.Sacrifices);
+    // 已经顶在上限：再献祭 1 股只能换 1 固资 + 1 上限，纯亏，直接不补。
+    if (ceiling > 0 && assets >= ceiling) {
+      log(
+        'warn',
+        `「${name}」固资 ${fmt(assets)} 已到塔上限 ${fmt(ceiling)}，不再献祭` +
+          '（到上限后 1 股只换 1 固资 + 1 上限，不划算；要补只能先提高上限）'
+      );
+      return assets;
+    }
+
     log(
       'info',
-      `「${name}」固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}，低于预计所需 ${fmt(need)}，开始自动献祭（每轮 ${fmt(per)} 股）`
+      `「${name}」固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}，低于本批所需 ${fmt(need)}，开始自动献祭` +
+        (auto ? '（单次献祭留空：按缺口算股数，1 股补 2 固资）' : `（每轮 ${fmt(rawPer)} 股）`)
     );
 
     for (let round = 1; round <= 10 && assets < need; round++) {
@@ -4137,11 +4223,33 @@
         log('fail', `没有「${name}」的持股了，无法继续补充`);
         return assets;
       }
-      // 固定股数：用户填多少就烧多少，最多不超过手上持股
-      const amt = Math.min(per, hold);
-      if (amt <= 0) return assets;
 
-      log('info', `第 ${round} 轮：献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股，还差 ${fmt(gap)} 固资）`);
+      // 不破上限的股数上限：留 1 点时宁可差着，也不献祭（一献上限就 +1）
+      const capAmt = maxSharesBeforeCap(assets, ceiling);
+      if (capAmt <= 0) {
+        log(
+          'warn',
+          `固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}：再献祭就会把上限顶高，已停在原地不再补充` +
+            '（上限涨上去以后每股只值 1 固资）'
+        );
+        return assets;
+      }
+
+      const want = auto ? sharesForGap(gap, assets, ceiling) : rawPer;
+      if (want <= 0) {
+        log('warn', `固资 ${fmt(assets)} 距上限 ${fmt(ceiling)} 已不足 2 点，再献就会破限，停止补充`);
+        return assets;
+      }
+      const amt = Math.min(want, capAmt, hold);
+      if (amt < want) {
+        log(
+          'info',
+          `按塔上限 ${fmt(ceiling)} 收着补：本轮最多 ${fmt(capAmt)} 股（原计划 ${fmt(want)} 股，` +
+            '多献会把上限一起顶高）'
+        );
+      }
+
+      log('info', `第 ${round} 轮：还差 ${fmt(gap)} 固资 → 献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股）`);
       try {
         const r = await api(`chara/sacrifice/${cid}/${amt}/false`, { method: 'POST', body: '{}' });
         const back = num(r && r.Balance);
@@ -4161,8 +4269,15 @@
       temple = await myTemple(cid);
       if (!temple) return assets;
       const before = assets;
+      const beforeCeil = ceiling;
       assets = num(temple.Assets);
-      log('info', `固资 ${fmt(before)} → ${fmt(assets)}`);
+      const ceil2 = num(temple.Sacrifices);
+      if (ceil2 > 0) ceiling = ceil2;
+      log(
+        'info',
+        `固资 ${fmt(before)} → ${fmt(assets)}` +
+          (ceiling !== beforeCeil ? `，上限 ${fmt(beforeCeil)} → ${fmt(ceiling)}` : '')
+      );
       // 献祭了却没涨，说明口径和预期不一样，宁可停下也不要反复烧股
       if (assets <= before) {
         log('warn', '献祭后固资没有增加，已停止自动补充（请手动确认献祭规则）');
@@ -4170,7 +4285,17 @@
       }
     }
 
-    if (assets < need) log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），继续执行可能会失败`);
+    if (assets < need) {
+      if (ceiling > 0 && assets >= ceiling - 1) {
+        log(
+          'info',
+          `已补到固资 ${fmt(assets)}（上限 ${fmt(ceiling)}），受上限限制不再往上补——` +
+            '再献祭虽然能凑够，但会把上限一起撑高，不划算'
+        );
+      } else {
+        log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），继续执行可能会失败`);
+      }
+    }
     return assets;
   }
 
@@ -4219,8 +4344,8 @@
     if (def.needTarget && !to) return setMagicStatus('请填目标角色 ID');
     if (from === to && def.needTarget) return setMagicStatus('炮塔和目标不能是同一个角色');
 
-    const times = Math.max(1, Math.min(50, Math.floor(num(S.mTimes) || 1)));
-    S.mTimes = times;
+    const times = magicTimes(mode);
+    S.mTimesBy[mode] = times;
     if (els.mTimes) els.mTimes.value = String(times);
 
     magicRunning = true;
@@ -4272,12 +4397,12 @@
         setMagicStatus(`第 ${i} / ${times} 次…`);
 
         // 固资不足时自动献祭炮塔角色自己的持股补塔。
-        // 一次补够「这一批剩余次数」要用的量（上限 = 该道具每日可用次数），
-        // 以前只按 3 次算（100×3=300），跑到第 2 发就刚好差钱，看着像没补充。
-        if (S.mFill && (assetsLeft === null || assetsLeft < def.cost)) {
+        // 门槛是站点要求的 250（不是单次消耗）：低于 250 一次都用不了，
+        // 而且要留出这一批实际要扣的固资，所以补到 250 + 消耗×次数。
+        if (S.mFill && (assetsLeft === null || assetsLeft < MAGIC_MIN_FA)) {
           const remain = times - i + 1;
-          const need = def.cost * Math.min(remain, def.daily || remain);
-          if (assetsLeft !== null) log('warn', `炮塔固资预计只剩 ${fmt(assetsLeft)}，先自动补充（本批还差 ${remain} 次）`);
+          const need = MAGIC_MIN_FA + def.cost * Math.min(remain, def.daily || remain);
+          if (assetsLeft !== null) log('warn', `炮塔固资预计只剩 ${fmt(assetsLeft)}（低于 ${fmt(MAGIC_MIN_FA)} 或不够本批），先自动补充（本批还差 ${remain} 次）`);
           const filled = await fillAssets(from, need, log);
           if (filled !== null) assetsLeft = filled;
         }
@@ -4317,7 +4442,7 @@
               if (t) realAssets = num(t.Assets);
             } catch (e) {}
           }
-          const shortOfAssets = realAssets !== null && realAssets < def.cost;
+          const shortOfAssets = realAssets !== null && realAssets < MAGIC_MIN_FA;
 
           if (shortOfAssets && S.mFill && retryLeft > 0) {
             // 真·缺钱：补一次，然后把这一次重试掉（不计入失败数）
@@ -4325,11 +4450,11 @@
             assetsLeft = realAssets;
             pushMagicLog(
               h('div', { class: 'tgtk-log tgtk-log-warn' },
-                `#${i}  固资只有 ${fmt(realAssets)}（< 单次 ${fmt(def.cost)}），不是次数上限；补充后重试这一次`)
+                `#${i}  固资只有 ${fmt(realAssets)}（低于站点要求的 ${fmt(MAGIC_MIN_FA)}），不是次数上限；补充后重试这一次`)
             );
-            const filled = await fillAssets(from, def.cost, log);
+            const filled = await fillAssets(from, MAGIC_MIN_FA + def.cost, log);
             if (filled !== null) assetsLeft = filled;
-            if (filled !== null && filled >= def.cost) {
+            if (filled !== null && filled >= MAGIC_MIN_FA) {
               i--;
               continue;
             }
@@ -4340,13 +4465,13 @@
           if (shortOfAssets) {
             pushMagicLog(
               h('div', { class: 'tgtk-log tgtk-log-warn' },
-                `已核对：固资不足（${fmt(realAssets)} < ${fmt(def.cost)}）` +
+                `已核对：固资不足（${fmt(realAssets)} < ${fmt(MAGIC_MIN_FA)}，站点要求炮塔固资至少 ${fmt(MAGIC_MIN_FA)} 才能用道具）` +
                   (S.mFill ? '，补充后仍然不够' : '，可勾选「固资不足时自动献祭补充」'))
             );
           } else if (realAssets !== null) {
             pushMagicLog(
               h('div', { class: 'tgtk-log tgtk-log-info' },
-                `已核对：固资 ${fmt(realAssets)} ≥ ${fmt(def.cost)}，够用，是今日次数用完`)
+                `已核对：固资 ${fmt(realAssets)} ≥ ${fmt(MAGIC_MIN_FA)}，够用，是今日次数用完`)
             );
           }
           // 次数上限是硬限制：继续跑只会把后面几次也烧成同样的报错，直接中断整批
@@ -4434,7 +4559,9 @@
    * 一键冲星专用：把本角色活股献祭成固资，补到至少 need。
    * 与道具页的 fillAssets 分开，因为那边是「每次固定献 N 股」，
    * 这里要按缺口反推（1 股活股 = 2 固资，用户 2026-11 确认的固定比例）：
-   *   补满 500 上限 → 250 股；最后一批只要 1000 → 500 股。
+   *   从 0 补满 500 上限 → 250 股；最后一批只要 1000 → 500 股。
+   * **不越过上限**：237 固资、500 上限时只献 131 股补到 499；
+   * 献 132 股虽然能到 500 以上，但上限会被顶成 501，之后每股只值 1 固资。
    * 每轮重新读塔校准，防止比例有偏差时反复烧股；返回补完后的固资。
    */
   async function fillStarAssets(cid, need, log) {
@@ -4449,7 +4576,7 @@
       log('info', `「${name}」固资 ${fmt(assets)} ≥ 本批所需 ${fmt(need)}，无需献祭`);
       return assets;
     }
-    const ceiling = num(temple.Sacrifices) || need;
+    const ceiling = Math.max(0, Math.floor(num(temple.Sacrifices) || 0));
     for (let round = 1; round <= 12 && assets < need; round++) {
       if (!starRunning) return assets;
       let hold = 0;
@@ -4459,10 +4586,20 @@
       }
       if (hold <= 0) { log('fail', `没有「${name}」的持股了，无法继续补充`); return assets; }
       const gap = need - assets;
-      // 1 股活股 = 2 固资 → 补足缺口所需股数；不超过手上持股、也不超过塔上限
-      let amt = Math.min(Math.max(1, Math.ceil(gap / 2)), hold, Math.max(1, Math.ceil(ceiling / 2)));
+      // 1 股活股 = 2 固资；但绝不越过上限（越过会让上限 +1，等于之后每股只值 1 固资）
+      const capAmt = maxSharesBeforeCap(assets, ceiling);
+      if (capAmt <= 0) {
+        log(
+          'warn',
+          `固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}：再献祭就会把上限顶高，停在原地不再补` +
+            '（宁可差 1 点，也不让上限多 1）'
+        );
+        return assets;
+      }
+      const want = Math.ceil(gap / 2);
+      const amt = Math.min(want, hold, capAmt);
       if (amt <= 0) return assets;
-      log('info', `第 ${round} 轮：献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股，还差 ${fmt(gap)} 固资）`);
+      log('info', `第 ${round} 轮：还差 ${fmt(gap)} 固资 → 献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股）`);
       try {
         const r = await api(`chara/sacrifice/${cid}/${amt}/false`, { method: 'POST', body: '{}' });
         const back = num(r && r.Balance);
@@ -4486,7 +4623,13 @@
         return assets;
       }
     }
-    if (assets < need) log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），本批可能无法完成`);
+    if (assets < need) {
+      if (ceiling > 0 && assets >= ceiling - 1) {
+        log('info', `已补到固资 ${fmt(assets)}（上限 ${fmt(ceiling)}），受上限限制不再往上补`);
+      } else {
+        log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），本批可能无法完成`);
+      }
+    }
     return assets;
   }
 
@@ -4557,7 +4700,7 @@
 
         let guard = 0;
         while (starRunning && done < amount && guard++ < 500) {
-          const count = Math.min(ceiling, amount - done);
+          let count = Math.min(ceiling, amount - done);
           if (assets < count) {
             if (!S.starFill) {
               log('warn', `固资只剩 ${fmt(assets)}，不够转一次 ${fmt(count)}`);
@@ -4570,8 +4713,15 @@
             }
             assets = filled;
             if (assets < count) {
-              log('warn', `补完固资仍只有 ${fmt(assets)}，不够 ${fmt(count)}`);
-              break;
+              // 受塔上限所限补不满（例如 237 → 只能到 499，硬补会让上限变 501）：
+              // 不再硬凑，这一批就按现有固资转，剩下的留到下一批。
+              if (ceiling > 0 && assets >= ceiling - 1 && assets > 0) {
+                log('info', `固资最多补到 ${fmt(assets)}（再补会把上限 ${fmt(ceiling)} 撑高），这一批按 ${fmt(assets)} 转`);
+                count = assets;
+              } else {
+                log('warn', `补完固资仍只有 ${fmt(assets)}，不够 ${fmt(count)}`);
+                break;
+              }
             }
           }
 
@@ -6672,7 +6822,16 @@
       mTo,
       mToFav
     );
-    const mTimes = h('input', { id: 'tgtk-mtimes', type: 'number', min: '1', max: '50', step: '1', value: String(S.mTimes) });
+    // 次数按道具分开记：切到哪种道具就显示哪种的次数，改一个不会连带改到别的
+    const mTimes = h('input', {
+      id: 'tgtk-mtimes',
+      type: 'number',
+      min: '1',
+      max: '50',
+      step: '1',
+      value: String(magicTimes(S.magic)),
+      title: `本次执行次数；${MAGIC_DEFS[S.magic].name}每日上限 ${MAGIC_DEFS[S.magic].daily} 次`,
+    });
     const mStop = h('input', { id: 'tgtk-mstop', type: 'checkbox' });
     mStop.checked = S.mStop;
     const mRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '执行');
@@ -6687,10 +6846,11 @@
     const mFillMax = h('input', {
       id: 'tgtk-mfillmax',
       type: 'number',
-      min: '1',
+      min: '0',
       step: '1',
-      value: String(num(S.mFillMax) || 300),
-      title: '每次自动补充时一次性献祭多少股（不够会再来一轮）',
+      value: S.mFillMax === '' || S.mFillMax === undefined ? '' : String(num(S.mFillMax) || 300),
+      placeholder: '留空=按缺口',
+      title: '每轮一次性献祭多少股；留空 = 按缺口自动算（1 股补 2 固资），不够会再来一轮。两种模式都不会越过塔上限，到上限就停，宁可差 1 点也不撑高上限',
     });
     const mFillMaxWrap = h('span', { class: 'tgtk-inline' }, h('i', null, '单次献祭'), mFillMax, h('i', null, '股'));
     const mFillRow = h(
@@ -6714,7 +6874,7 @@
     // 每批固资自动取塔上限（不用手填），结束后按下面选的口径补回去。
     // 「补到 250」是给「只留 250 固资、避免被虚空道标打中」的玩法准备的。
     const sEndModes = [
-      ['full', '补满', '收尾把塔补回固资上限（默认）'],
+      ['full', '补满', '收尾把塔补回固资上限（默认）。不会越过上限：差 1 点补不上就停在 499，宁可差一点也不让上限 +1'],
       ['250', '补到 250', '收尾只补到 250 固资，避免被虚空道标打中'],
       ['none', '不补', '收尾不补，塔内固资保持转化后的剩余量'],
     ].map(([v, t, tip]) =>
@@ -8130,6 +8290,9 @@
       mToWrap.hidden = !def.needTarget;
       mFillMaxWrap.hidden = !S.mFill;
       mTip.textContent = def.tip;
+      // 换道具 = 换一本次数（三种各存各的），顺带把当天的上限写进悬停提示
+      mTimes.value = String(magicTimes(S.magic));
+      mTimes.title = `本次执行次数；${def.name}每日上限 ${def.daily} 次`;
       setMagicStatus('');
       refreshMagicPreview();
     };
@@ -8161,9 +8324,13 @@
       if (id) loadNames([id], true).then(() => els && refreshMagicPreview());
     });
     mTimes.addEventListener('input', () => {
-      S.mTimes = num(mTimes.value) || 1;
+      // 只改当前这种道具的次数，另外两种不受影响
+      S.mTimesBy[S.magic] = Math.max(1, Math.min(50, Math.floor(num(mTimes.value) || 1)));
       persist();
       refreshMagicPreview();
+    });
+    mTimes.addEventListener('blur', () => {
+      mTimes.value = String(magicTimes(S.magic));
     });
     mStop.addEventListener('change', () => {
       S.mStop = mStop.checked;
@@ -8175,11 +8342,13 @@
       syncMagic();
     });
     mFillMax.addEventListener('input', () => {
-      S.mFillMax = Math.max(1, Math.floor(num(mFillMax.value) || 300));
+      // 留空 = 按缺口自动算股数；填数字 = 每轮固定烧这么多股
+      const raw = String(mFillMax.value == null ? '' : mFillMax.value).trim();
+      S.mFillMax = raw === '' ? '' : Math.max(1, Math.floor(num(raw) || 1));
       persist();
     });
     mFillMax.addEventListener('blur', () => {
-      mFillMax.value = String(Math.max(1, Math.floor(num(S.mFillMax) || 300)));
+      mFillMax.value = S.mFillMax === '' || S.mFillMax === undefined ? '' : String(Math.max(1, Math.floor(num(S.mFillMax) || 300)));
     });
     mRun.addEventListener('click', runMagic);
     mStopBtn.addEventListener('click', () => {
@@ -16481,7 +16650,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.13（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.17（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {

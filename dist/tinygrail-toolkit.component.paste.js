@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.13
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.17
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -125,7 +125,7 @@
     magic: 'chaos',
     mFrom: '',
     mTo: '',
-    mTimes: 1,
+    mTimesBy: { chaos: 1, guidepost: 1, fisheye: 1 },
     mStop: true,
     mFill: false, // 固资不足时自动献祭补充
     mFillMax: 300, // 每次自动补充时一次性献祭多少股（不再当上限用）
@@ -194,6 +194,19 @@
     try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch (e) {}
   }
   if (Number(S.gxBidAmount) === 50) S.gxBidAmount = 1;
+  if (!SAVED.mTimesBy || typeof SAVED.mTimesBy !== 'object') {
+    const legacy = Math.max(1, Math.min(50, Math.floor(Number(SAVED.mTimes) || 1)));
+    S.mTimesBy = { chaos: legacy, guidepost: legacy, fisheye: legacy };
+  }
+  {
+    const by = S.mTimesBy && typeof S.mTimesBy === 'object' ? S.mTimesBy : {};
+    S.mTimesBy = {
+      chaos: Math.max(1, Math.min(50, Math.floor(Number(by.chaos) || 1))),
+      guidepost: Math.max(1, Math.min(50, Math.floor(Number(by.guidepost) || 1))),
+      fisheye: Math.max(1, Math.min(50, Math.floor(Number(by.fisheye) || 1))),
+    };
+  }
+  delete S.mTimes;
   if (SAVED.filAssets === undefined) S.filAssets = !SAVED.showAll;
   if (SAVED.filCover === undefined) S.filCover = SAVED.cover === 'default' || SAVED.cover === 'custom';
   if (S.cover !== 'custom') S.cover = 'default';
@@ -3378,11 +3391,16 @@
     },
   };
 
+  function magicTimes(mode) {
+    const by = S.mTimesBy || {};
+    return Math.max(1, Math.min(50, Math.floor(num(by[mode]) || 1)));
+  }
+
   const magicNameTried = new Map(); // id → 上次补名时间；失败时限流重试，不永久放弃
   function refreshMagicPreview() {
     if (!els || !els.mPreview) return;
     const def = MAGIC_DEFS[S.magic];
-    const n = Math.max(1, Math.min(50, Math.floor(num(S.mTimes) || 1)));
+    const n = magicTimes(S.magic);
     const cost = def.cost;
     const from = parseCharId(S.mFrom);
     const to = def.needTarget ? parseCharId(S.mTo) : from;
@@ -3482,9 +3500,33 @@
     return num(v && v.Amount);
   }
 
+  const MAGIC_MIN_FA = 250;
+
+  function sharesForGap(gap, assets, ceiling) {
+    const g = Math.floor(num(gap));
+    const a = Math.floor(num(assets));
+    const c = Math.floor(num(ceiling));
+    if (g <= 0) return 0;
+    if (!(c > 0)) return Math.ceil(g / 2); // 上限读不到：当没上限，按 2 固资/股
+    if (a >= c) return 0; // 已到上限：再献就是拿 2 股换 2 固资 2 上限，亏，不补
+    const room = c - a; // 还能涨多少固资而不破限
+    const usable = room - (room % 2); // 2 固资一档，奇数那 1 点宁可留着
+    return Math.ceil(Math.min(g, usable) / 2);
+  }
+
+  function maxSharesBeforeCap(assets, ceiling) {
+    const a = Math.floor(num(assets));
+    const c = Math.floor(num(ceiling));
+    if (!(c > 0)) return Infinity;
+    const room = c - a;
+    if (!(room > 1)) return 0; // 已到上限，或只差 1 点（再献就破限）
+    return Math.floor(room / 2);
+  }
+
   async function fillAssets(cid, need, log) {
     const name = charaName(cid);
-    const per = Math.max(1, Math.floor(num(S.mFillMax) || 300));
+    const rawPer = Math.floor(num(S.mFillMax) || 0);
+    const auto = !(rawPer > 0); // 留空 / 0 → 按缺口算股数
     let temple = await myTemple(cid);
     if (!temple) {
       log('warn', (await selfKey()) ? '读取不到你的这座圣殿，跳过自动补充' : '读不到登录用户名（未登录小圣杯？），跳过自动补充');
@@ -3492,15 +3534,25 @@
     }
 
     let assets = num(temple.Assets);
+    let ceiling = num(temple.Sacrifices);
     if (assets >= need) {
-      log('info', `「${name}」固资 ${fmt(assets)} ≥ 预计所需 ${fmt(need)}，无需献祭`);
+      log('info', `「${name}」固资 ${fmt(assets)} ≥ 本批所需 ${fmt(need)}（站点要求至少 ${fmt(MAGIC_MIN_FA)}），无需献祭`);
       return assets;
     }
 
-    const ceiling = num(temple.Sacrifices);
+    if (ceiling > 0 && assets >= ceiling) {
+      log(
+        'warn',
+        `「${name}」固资 ${fmt(assets)} 已到塔上限 ${fmt(ceiling)}，不再献祭` +
+          '（到上限后 1 股只换 1 固资 + 1 上限，不划算；要补只能先提高上限）'
+      );
+      return assets;
+    }
+
     log(
       'info',
-      `「${name}」固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}，低于预计所需 ${fmt(need)}，开始自动献祭（每轮 ${fmt(per)} 股）`
+      `「${name}」固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}，低于本批所需 ${fmt(need)}，开始自动献祭` +
+        (auto ? '（单次献祭留空：按缺口算股数，1 股补 2 固资）' : `（每轮 ${fmt(rawPer)} 股）`)
     );
 
     for (let round = 1; round <= 10 && assets < need; round++) {
@@ -3518,10 +3570,32 @@
         log('fail', `没有「${name}」的持股了，无法继续补充`);
         return assets;
       }
-      const amt = Math.min(per, hold);
-      if (amt <= 0) return assets;
 
-      log('info', `第 ${round} 轮：献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股，还差 ${fmt(gap)} 固资）`);
+      const capAmt = maxSharesBeforeCap(assets, ceiling);
+      if (capAmt <= 0) {
+        log(
+          'warn',
+          `固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}：再献祭就会把上限顶高，已停在原地不再补充` +
+            '（上限涨上去以后每股只值 1 固资）'
+        );
+        return assets;
+      }
+
+      const want = auto ? sharesForGap(gap, assets, ceiling) : rawPer;
+      if (want <= 0) {
+        log('warn', `固资 ${fmt(assets)} 距上限 ${fmt(ceiling)} 已不足 2 点，再献就会破限，停止补充`);
+        return assets;
+      }
+      const amt = Math.min(want, capAmt, hold);
+      if (amt < want) {
+        log(
+          'info',
+          `按塔上限 ${fmt(ceiling)} 收着补：本轮最多 ${fmt(capAmt)} 股（原计划 ${fmt(want)} 股，` +
+            '多献会把上限一起顶高）'
+        );
+      }
+
+      log('info', `第 ${round} 轮：还差 ${fmt(gap)} 固资 → 献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股）`);
       try {
         const r = await api(`chara/sacrifice/${cid}/${amt}/false`, { method: 'POST', body: '{}' });
         const back = num(r && r.Balance);
@@ -3541,15 +3615,32 @@
       temple = await myTemple(cid);
       if (!temple) return assets;
       const before = assets;
+      const beforeCeil = ceiling;
       assets = num(temple.Assets);
-      log('info', `固资 ${fmt(before)} → ${fmt(assets)}`);
+      const ceil2 = num(temple.Sacrifices);
+      if (ceil2 > 0) ceiling = ceil2;
+      log(
+        'info',
+        `固资 ${fmt(before)} → ${fmt(assets)}` +
+          (ceiling !== beforeCeil ? `，上限 ${fmt(beforeCeil)} → ${fmt(ceiling)}` : '')
+      );
       if (assets <= before) {
         log('warn', '献祭后固资没有增加，已停止自动补充（请手动确认献祭规则）');
         return assets;
       }
     }
 
-    if (assets < need) log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），继续执行可能会失败`);
+    if (assets < need) {
+      if (ceiling > 0 && assets >= ceiling - 1) {
+        log(
+          'info',
+          `已补到固资 ${fmt(assets)}（上限 ${fmt(ceiling)}），受上限限制不再往上补——` +
+            '再献祭虽然能凑够，但会把上限一起撑高，不划算'
+        );
+      } else {
+        log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），继续执行可能会失败`);
+      }
+    }
     return assets;
   }
 
@@ -3591,8 +3682,8 @@
     if (def.needTarget && !to) return setMagicStatus('请填目标角色 ID');
     if (from === to && def.needTarget) return setMagicStatus('炮塔和目标不能是同一个角色');
 
-    const times = Math.max(1, Math.min(50, Math.floor(num(S.mTimes) || 1)));
-    S.mTimes = times;
+    const times = magicTimes(mode);
+    S.mTimesBy[mode] = times;
     if (els.mTimes) els.mTimes.value = String(times);
 
     magicRunning = true;
@@ -3642,10 +3733,10 @@
         }
         setMagicStatus(`第 ${i} / ${times} 次…`);
 
-        if (S.mFill && (assetsLeft === null || assetsLeft < def.cost)) {
+        if (S.mFill && (assetsLeft === null || assetsLeft < MAGIC_MIN_FA)) {
           const remain = times - i + 1;
-          const need = def.cost * Math.min(remain, def.daily || remain);
-          if (assetsLeft !== null) log('warn', `炮塔固资预计只剩 ${fmt(assetsLeft)}，先自动补充（本批还差 ${remain} 次）`);
+          const need = MAGIC_MIN_FA + def.cost * Math.min(remain, def.daily || remain);
+          if (assetsLeft !== null) log('warn', `炮塔固资预计只剩 ${fmt(assetsLeft)}（低于 ${fmt(MAGIC_MIN_FA)} 或不够本批），先自动补充（本批还差 ${remain} 次）`);
           const filled = await fillAssets(from, need, log);
           if (filled !== null) assetsLeft = filled;
         }
@@ -3681,18 +3772,18 @@
               if (t) realAssets = num(t.Assets);
             } catch (e) {}
           }
-          const shortOfAssets = realAssets !== null && realAssets < def.cost;
+          const shortOfAssets = realAssets !== null && realAssets < MAGIC_MIN_FA;
 
           if (shortOfAssets && S.mFill && retryLeft > 0) {
             retryLeft--;
             assetsLeft = realAssets;
             pushMagicLog(
               h('div', { class: 'tgtk-log tgtk-log-warn' },
-                `#${i}  固资只有 ${fmt(realAssets)}（< 单次 ${fmt(def.cost)}），不是次数上限；补充后重试这一次`)
+                `#${i}  固资只有 ${fmt(realAssets)}（低于站点要求的 ${fmt(MAGIC_MIN_FA)}），不是次数上限；补充后重试这一次`)
             );
-            const filled = await fillAssets(from, def.cost, log);
+            const filled = await fillAssets(from, MAGIC_MIN_FA + def.cost, log);
             if (filled !== null) assetsLeft = filled;
-            if (filled !== null && filled >= def.cost) {
+            if (filled !== null && filled >= MAGIC_MIN_FA) {
               i--;
               continue;
             }
@@ -3703,13 +3794,13 @@
           if (shortOfAssets) {
             pushMagicLog(
               h('div', { class: 'tgtk-log tgtk-log-warn' },
-                `已核对：固资不足（${fmt(realAssets)} < ${fmt(def.cost)}）` +
+                `已核对：固资不足（${fmt(realAssets)} < ${fmt(MAGIC_MIN_FA)}，站点要求炮塔固资至少 ${fmt(MAGIC_MIN_FA)} 才能用道具）` +
                   (S.mFill ? '，补充后仍然不够' : '，可勾选「固资不足时自动献祭补充」'))
             );
           } else if (realAssets !== null) {
             pushMagicLog(
               h('div', { class: 'tgtk-log tgtk-log-info' },
-                `已核对：固资 ${fmt(realAssets)} ≥ ${fmt(def.cost)}，够用，是今日次数用完`)
+                `已核对：固资 ${fmt(realAssets)} ≥ ${fmt(MAGIC_MIN_FA)}，够用，是今日次数用完`)
             );
           }
           if (isQuotaMagicError(msg)) {
@@ -3792,7 +3883,7 @@
       log('info', `「${name}」固资 ${fmt(assets)} ≥ 本批所需 ${fmt(need)}，无需献祭`);
       return assets;
     }
-    const ceiling = num(temple.Sacrifices) || need;
+    const ceiling = Math.max(0, Math.floor(num(temple.Sacrifices) || 0));
     for (let round = 1; round <= 12 && assets < need; round++) {
       if (!starRunning) return assets;
       let hold = 0;
@@ -3802,9 +3893,19 @@
       }
       if (hold <= 0) { log('fail', `没有「${name}」的持股了，无法继续补充`); return assets; }
       const gap = need - assets;
-      let amt = Math.min(Math.max(1, Math.ceil(gap / 2)), hold, Math.max(1, Math.ceil(ceiling / 2)));
+      const capAmt = maxSharesBeforeCap(assets, ceiling);
+      if (capAmt <= 0) {
+        log(
+          'warn',
+          `固资 ${fmt(assets)} / 上限 ${fmt(ceiling)}：再献祭就会把上限顶高，停在原地不再补` +
+            '（宁可差 1 点，也不让上限多 1）'
+        );
+        return assets;
+      }
+      const want = Math.ceil(gap / 2);
+      const amt = Math.min(want, hold, capAmt);
       if (amt <= 0) return assets;
-      log('info', `第 ${round} 轮：献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股，还差 ${fmt(gap)} 固资）`);
+      log('info', `第 ${round} 轮：还差 ${fmt(gap)} 固资 → 献祭「${name}」${fmt(amt)} 股（持有 ${fmt(hold)} 股）`);
       try {
         const r = await api(`chara/sacrifice/${cid}/${amt}/false`, { method: 'POST', body: '{}' });
         const back = num(r && r.Balance);
@@ -3827,7 +3928,13 @@
         return assets;
       }
     }
-    if (assets < need) log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），本批可能无法完成`);
+    if (assets < need) {
+      if (ceiling > 0 && assets >= ceiling - 1) {
+        log('info', `已补到固资 ${fmt(assets)}（上限 ${fmt(ceiling)}），受上限限制不再往上补`);
+      } else {
+        log('warn', `固资仍不足（${fmt(assets)} < ${fmt(need)}），本批可能无法完成`);
+      }
+    }
     return assets;
   }
 
@@ -3889,7 +3996,7 @@
 
         let guard = 0;
         while (starRunning && done < amount && guard++ < 500) {
-          const count = Math.min(ceiling, amount - done);
+          let count = Math.min(ceiling, amount - done);
           if (assets < count) {
             if (!S.starFill) {
               log('warn', `固资只剩 ${fmt(assets)}，不够转一次 ${fmt(count)}`);
@@ -3902,8 +4009,13 @@
             }
             assets = filled;
             if (assets < count) {
-              log('warn', `补完固资仍只有 ${fmt(assets)}，不够 ${fmt(count)}`);
-              break;
+              if (ceiling > 0 && assets >= ceiling - 1 && assets > 0) {
+                log('info', `固资最多补到 ${fmt(assets)}（再补会把上限 ${fmt(ceiling)} 撑高），这一批按 ${fmt(assets)} 转`);
+                count = assets;
+              } else {
+                log('warn', `补完固资仍只有 ${fmt(assets)}，不够 ${fmt(count)}`);
+                break;
+              }
             }
           }
 
@@ -5841,7 +5953,15 @@
       mTo,
       mToFav
     );
-    const mTimes = h('input', { id: 'tgtk-mtimes', type: 'number', min: '1', max: '50', step: '1', value: String(S.mTimes) });
+    const mTimes = h('input', {
+      id: 'tgtk-mtimes',
+      type: 'number',
+      min: '1',
+      max: '50',
+      step: '1',
+      value: String(magicTimes(S.magic)),
+      title: `本次执行次数；${MAGIC_DEFS[S.magic].name}每日上限 ${MAGIC_DEFS[S.magic].daily} 次`,
+    });
     const mStop = h('input', { id: 'tgtk-mstop', type: 'checkbox' });
     mStop.checked = S.mStop;
     const mRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '执行');
@@ -5856,10 +5976,11 @@
     const mFillMax = h('input', {
       id: 'tgtk-mfillmax',
       type: 'number',
-      min: '1',
+      min: '0',
       step: '1',
-      value: String(num(S.mFillMax) || 300),
-      title: '每次自动补充时一次性献祭多少股（不够会再来一轮）',
+      value: S.mFillMax === '' || S.mFillMax === undefined ? '' : String(num(S.mFillMax) || 300),
+      placeholder: '留空=按缺口',
+      title: '每轮一次性献祭多少股；留空 = 按缺口自动算（1 股补 2 固资），不够会再来一轮。两种模式都不会越过塔上限，到上限就停，宁可差 1 点也不撑高上限',
     });
     const mFillMaxWrap = h('span', { class: 'tgtk-inline' }, h('i', null, '单次献祭'), mFillMax, h('i', null, '股'));
     const mFillRow = h(
@@ -5880,7 +6001,7 @@
       title: '每个角色这次贡献多少星之力，默认 100',
     });
     const sEndModes = [
-      ['full', '补满', '收尾把塔补回固资上限（默认）'],
+      ['full', '补满', '收尾把塔补回固资上限（默认）。不会越过上限：差 1 点补不上就停在 499，宁可差一点也不让上限 +1'],
       ['250', '补到 250', '收尾只补到 250 固资，避免被虚空道标打中'],
       ['none', '不补', '收尾不补，塔内固资保持转化后的剩余量'],
     ].map(([v, t, tip]) =>
@@ -7230,6 +7351,8 @@
       mToWrap.hidden = !def.needTarget;
       mFillMaxWrap.hidden = !S.mFill;
       mTip.textContent = def.tip;
+      mTimes.value = String(magicTimes(S.magic));
+      mTimes.title = `本次执行次数；${def.name}每日上限 ${def.daily} 次`;
       setMagicStatus('');
       refreshMagicPreview();
     };
@@ -7261,9 +7384,12 @@
       if (id) loadNames([id], true).then(() => els && refreshMagicPreview());
     });
     mTimes.addEventListener('input', () => {
-      S.mTimes = num(mTimes.value) || 1;
+      S.mTimesBy[S.magic] = Math.max(1, Math.min(50, Math.floor(num(mTimes.value) || 1)));
       persist();
       refreshMagicPreview();
+    });
+    mTimes.addEventListener('blur', () => {
+      mTimes.value = String(magicTimes(S.magic));
     });
     mStop.addEventListener('change', () => {
       S.mStop = mStop.checked;
@@ -7275,11 +7401,12 @@
       syncMagic();
     });
     mFillMax.addEventListener('input', () => {
-      S.mFillMax = Math.max(1, Math.floor(num(mFillMax.value) || 300));
+      const raw = String(mFillMax.value == null ? '' : mFillMax.value).trim();
+      S.mFillMax = raw === '' ? '' : Math.max(1, Math.floor(num(raw) || 1));
       persist();
     });
     mFillMax.addEventListener('blur', () => {
-      mFillMax.value = String(Math.max(1, Math.floor(num(S.mFillMax) || 300)));
+      mFillMax.value = S.mFillMax === '' || S.mFillMax === undefined ? '' : String(Math.max(1, Math.floor(num(S.mFillMax) || 300)));
     });
     mRun.addEventListener('click', runMagic);
     mStopBtn.addEventListener('click', () => {
@@ -14759,7 +14886,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.13（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.17（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
