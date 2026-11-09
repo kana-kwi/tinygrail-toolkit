@@ -69,6 +69,10 @@
  *        （1→2、2→4、3→5、4→6、5→7、6→8、7→8、8→9、9→9、10→9、11→10…18→12），
  *        旧版 ICO 页也会在「发行价」后面补同样的胶囊
  *   7) 账本：资金收支、股数增减、圣殿固资三个维度按来源分类汇总（按日志 Type 字段归类）
+ *      + 统计窗口按**自然日**切：第一天 0:00 ~ 最后一天 24:00（范围可选近 3/7/14/30 天，也能自定义起止日；
+ *        不是「现在往前推 N×24 小时」，否则首尾两天各被切掉半截，隔几小时再看数就变了）
+ *      + 刮刮乐的「次数」按购买次数算（每次 -1000 cc 一条），不按奖励行数（刮一次会掉好几条获奖记录）
+ *      + 圣殿固资只统计真有「N 点固定资产」的行，道具奖励那种 0 点的行不再计数
  *      + 账户余额走势 + 按角色股数排行 + 圣殿被道标命中按角色汇总
  *      + 道标文案兼容「71股固定资产」与「34股」两种写法（分别记固资与扣股）
  *      + 竞拍 / 买入记净额（扣掉失败返还、撤单退款），股息按税后计
@@ -76,6 +80,8 @@
  *      + 股数损失只算真正成交的卖出，献祭按消耗计，星之力转化不计入股数
  *   8) 界面：可切换日间 / 夜间模式；面板与悬浮球都能按住随意拖动，位置记在本机，
  *      双击标题栏或点「⌖」复位；窗口优先挂到最外层页面，能拖出小圣杯区域、盖到页面左侧空白区；
+ *      bgm 右下角那条工具条里多一个「工具箱」开关：点一下把胶囊收起来（免得挡页面右下角），
+ *      再点一下放出来；收起状态记在本机，Alt+T 也能顺手把胶囊放回来；
  *      主实例心跳 + 看门狗：从左栏 / DD 列表点开角色导致 iframe 重载时也不会卡死，会自动重建；
  *      点角色后工具箱会自动重启，并回到关闭前的标签页与窗口位置；
  *      顶部标签栏可横向滑动，功能再多也不会撑大面板；
@@ -209,7 +215,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.17（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.21（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -442,13 +448,17 @@
     templePins: [],
     templePinOn: true,
     // 资金日志 / 账本
-    logDays: 7,
+    logDays: 7, // 数字 = 近 N 天；'custom' = 用下面两个日期
+    logFrom: '', // 自定义起始日 YYYY-MM-DD（含当天 0:00）
+    logTo: '', // 自定义结束日 YYYY-MM-DD（含当天 24:00）
     logSort: 'active',
     logTop: 20,
     ledgerView: 'fund',
     // 悬浮窗位置（null = 用默认右下角）
     panelPos: null,
     fabPos: null,
+    // 工具箱胶囊是否收起：收进 bgm 右下角工具条的那个开关里（只在有工具条的页面生效）
+    fabHidden: false,
     panelOpen: false, // 面板是否打开：iframe 重载后据此自动恢复
     // 跨设备同步
     syncMode: 'code', // code = 仅同步码 / url = 自定义 GET·PUT 接口 / gist = GitHub 私密 Gist
@@ -604,6 +614,8 @@
   let fantasyRows = [];
   let favRows = [];
   let logAll = [];
+  /** 账本当前统计窗口（自然日）：from = 第一天 0:00，to = 最后一天 24:00 */
+  let logWindow = null;
   let magicRunning = false;
   let starRunning = false;
   const starCapCache = Object.create(null); // 角色 → 塔的固资上限（读过一次就记住，用于消耗估算）
@@ -5712,6 +5724,66 @@
     return Number.isNaN(t) ? 0 : t;
   }
 
+  /**
+   * 「今天 0 点往前 offset 天」的毫秒时间戳（offset 可以为负，-1 = 明天 0 点）。
+   * 账本按**自然日**统计：从第一天的 0:00 到最后一天的 24:00，
+   * 而不是「现在往前推 N×24 小时」——后者会把首尾两天各切掉半截，
+   * 隔着几个小时再看，同一批记录一会儿算进来一会儿算出去。
+   */
+  function dayStartMs(offset) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (offset || 0));
+    return d.getTime();
+  }
+
+  /** 月/日两位显示（账本窗口用），如 11/03 */
+  function fmtDay(ms) {
+    const d = new Date(num(ms));
+    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+  }
+
+  /** 'YYYY-MM-DD' → 当天 0:00 的毫秒时间戳；格式不对返回 null */
+  function parseDayMs(v) {
+    const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  /** 毫秒时间戳 → 'YYYY-MM-DD'（本地时区），给日期输入框用 */
+  function dayStr(ms) {
+    const d = new Date(num(ms));
+    return (
+      d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+    );
+  }
+
+  /** 当前统计窗口（自然日）：自定义优先，否则「今天 0 点往前 days-1 天 → 明天 0 点」 */
+  function logRange() {
+    if (String(S.logDays) === 'custom') {
+      const f = parseDayMs(S.logFrom);
+      const t = parseDayMs(S.logTo);
+      if (f != null || t != null) {
+        const from = f != null ? f : t - 6 * 86400000;
+        let to = (t != null ? t : from) + 86400000;
+        if (to <= from) to = from + 86400000; // 起止填反了也给一天
+        return { from, to, days: Math.round((to - from) / 86400000), custom: true };
+      }
+      // 选了自定义但还没填日期：先按近 7 天
+    }
+    const days = Math.max(1, Math.min(90, Math.floor(num(S.logDays) || 7)));
+    return { from: dayStartMs(days - 1), to: dayStartMs(-1), days, custom: false };
+  }
+
+  /** 窗口文字：近 7 天 / 11/01 ~ 11/09（9 天） */
+  function logRangeLabel(r) {
+    const g = r || logRange();
+    return g.custom ? `${fmtDay(g.from)} ~ ${fmtDay(g.to - 1)}（${g.days} 天）` : `近 ${g.days} 天`;
+  }
+
   /** 从描述里抠角色 ID（兜底，正常走 RelatedId） */
   function descCharaId(desc) {
     const m = String(desc || '').match(/#(\d+)/);
@@ -5851,6 +5923,7 @@
     const hitMap = new Map();
     const auctionBack = { sum: 0, n: 0 }; // 竞拍失败返还，最后从「竞拍」支出里扣
     const buyBack = { sum: 0, n: 0 }; // 取消买入 / 冰山撤回的返还，最后从「买入」支出里扣
+    let scratchBuys = 0; // 刮刮乐「购买」次数（每次 -1000 cc 一条），用来当次数，别用奖励行数
 
     const add = (map, key, label, val, desc) => {
       let r = map.get(key);
@@ -5872,6 +5945,7 @@
       const rawAmt = x.Amount === undefined || x.Amount === null ? descAmount(desc) : x.Amount;
       const amt = num(rawAmt);
       const kind = classifyKind(desc, amt, ch, x.Type);
+      if (kind === 'scratch' && ch < 0) scratchBuys++;
 
       const put = (map, allowed, val) => {
         const k = allowed.includes(kind) ? kind : 'other';
@@ -5909,7 +5983,10 @@
 
       // 固定资产：日志里没有独立字段，只能靠描述归类 + 抠数值
       const fk = fixedKind(desc);
-      if (fk) {
+      // 没解析出固资数值的行不是固资变动，跳过（不能 return，后面还要读 Balance 更新账户余额）：
+      // 「使用「虚空道标」获得 6「伊吹风子」48股」这类行写着「获得」+ 道具名，
+      // 以前会被记成「固资获得 0 点」，于是面板上出现「固资获得 57 次」却一分没有的怪现象。
+      if (fk && parseFixed(desc) > 0) {
         const fAmt = parseFixed(desc);
         const sAmt = parseFixedShares(desc);
         const gain = /获得|增加|补充|恢复|注入/.test(String(desc || ''));
@@ -5933,6 +6010,16 @@
         ccTs = ts;
       }
     });
+
+    // 刮刮乐的「次数」按购买次数算（日志里每次 -1000 cc 一条），
+    // 不是奖励行数：刮一次会掉好几条「彩票刮刮乐获奖」记录，行数会虚高两三倍。
+    if (scratchBuys > 0) {
+      const scRow = buckets.stockIn.get('scratch');
+      if (scRow) {
+        scRow.n = scratchBuys;
+        scRow.countBy = 'buy';
+      }
+    }
 
     // 股息记税后：把个税从股息收入里扣掉，个税不再单独出现在支出里
     const div = buckets.fundIn.get('dividend');
@@ -6097,8 +6184,12 @@
     els.logList.textContent = '';
 
     try {
-      const days = Math.max(1, Math.min(90, Math.floor(num(S.logDays) || 7)));
-      const cutoff = Date.now() - days * 86400000;
+      // 自然日窗口：自定义日期优先，否则今天 0 点往前 days-1 天 → 明天 0 点（= 最后一天的 24:00）
+      const range = logRange();
+      const winFrom = range.from;
+      const winTo = range.to;
+      logWindow = range;
+      const cutoff = winFrom;
       let page = 1;
       let pages = 1;
       let reached = false;
@@ -6115,6 +6206,9 @@
             reached = true;
             break;
           }
+          // 自定义区间可能以「过去的某天」结束：比结束日还新的记录要跳过（不能 break，
+          // 后面还有落在区间里的），否则选 11/05~11/07 也会把 11/08、11/09 算进来
+          if (ts && winTo && ts >= winTo) continue;
           logAll.push(items[i]);
         }
 
@@ -6225,11 +6319,15 @@
     const mv = holdAll.reduce((s, x) => s + num(x.UserAmount) * num(x.Current), 0);
     const cc = st.cc || (snaps.length ? snaps[snaps.length - 1].cc : 0);
 
-    const times = logAll.map((x) => logTs(x.LogTime)).filter(Boolean);
-    const span = times.length
-      ? `${new Date(Math.min(...times)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} ~ ` +
-        `${new Date(Math.max(...times)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`
-      : '';
+    const win = logWindow;
+    const span = win
+      ? `${fmtDay(win.from)} 0:00 ~ ${fmtDay(win.to - 1)} 24:00`
+      : (() => {
+          const times = logAll.map((x) => logTs(x.LogTime)).filter(Boolean);
+          return times.length
+            ? `${fmtDay(Math.min(...times))} ~ ${fmtDay(Math.max(...times))}`
+            : '';
+        })();
 
     /* ---- 资产卡 ---- */
     const { pts, label } = assetSeries();
@@ -6312,7 +6410,7 @@
     /* 圣殿视角：谁被道标打了，一共掉了多少固资 */
     if (isFixed) {
       if (!st.hits.length) {
-        if (logAll.length) els.logList.appendChild(h('div', { class: 'tgtk-empty' }, '近 ' + num(S.logDays) + ' 天没有被虚空道标命中的记录'));
+        if (logAll.length) els.logList.appendChild(h('div', { class: 'tgtk-empty' }, logRangeLabel() + '没有被虚空道标命中的记录'));
         return;
       }
       els.logList.appendChild(
@@ -6384,7 +6482,7 @@
     const lines = [];
 
     if (view === 'fund') {
-      lines.push(`资金收支（近 ${num(S.logDays)} 天）`, '方向\t来源\t金额\t笔数');
+      lines.push(`资金收支（${logRangeLabel()}）`, '方向\t来源\t金额\t笔数');
       [
         ['收入', st.fundIn],
         ['支出', st.fundOut],
@@ -6399,7 +6497,7 @@
       const br = st.fundOut.rows.find((r) => r.key === 'buy' && r.refund);
       if (br) lines.push(`买入为净额：已扣除撤单 / 冰山退回 ${br.refund.toFixed(2)}（${br.refundN} 笔）`);
     } else if (view === 'stock') {
-      lines.push(`股数增减（近 ${num(S.logDays)} 天）`, '方向\t来源\t股数\t次数');
+      lines.push(`股数增减（${logRangeLabel()}）`, '方向\t来源\t股数\t次数');
       [
         ['获得', st.stockIn],
         ['损失', st.stockOut],
@@ -6413,7 +6511,7 @@
         lines.push([charaName(x.id) || '#' + x.id, x.gain, x.loss, x.gain - x.loss].join('\t'));
       });
     } else {
-      lines.push(`圣殿固资变动（近 ${num(S.logDays)} 天）`, '方向\t来源\t固资\t次数');
+      lines.push(`圣殿固资变动（${logRangeLabel()}）`, '方向\t来源\t固资\t次数');
       [
         ['损失', st.fixedOut],
         ['获得', st.fixedIn],
@@ -7555,9 +7653,28 @@
         ['7', '近 7 天'],
         ['14', '近 14 天'],
         ['30', '近 30 天'],
+        ['custom', '自定义'],
       ],
       String(S.logDays)
     );
+    // 自定义起止日：都是「含当天」，起点 0:00、终点 24:00
+    const lFrom = h('input', {
+      id: 'tgtk-lfrom',
+      type: 'date',
+      value: S.logFrom || dayStr(dayStartMs(6)),
+      title: '起始日（含当天 0:00）',
+    });
+    const lTo = h('input', {
+      id: 'tgtk-lto',
+      type: 'date',
+      value: S.logTo || dayStr(dayStartMs(0)),
+      title: '结束日（含当天 24:00）',
+    });
+    const lRangeWrap = h('span', { class: 'tgtk-inline' }, lFrom, h('i', null, '~'), lTo);
+    const syncRange = () => {
+      lRangeWrap.hidden = String(S.logDays) !== 'custom';
+    };
+    syncRange();
     const lSort = select(
       'tgtk-lsort',
       [
@@ -7603,7 +7720,7 @@
       'div',
       { class: 'tgtk-view', 'data-view': 'log' },
       assetBox,
-      line('范围', lDays),
+      line('范围', lDays, lRangeWrap),
       segWrap,
       h('div', { class: 'tgtk-line tgtk-actions' }, lRun, lCopy),
       flowBox,
@@ -8500,10 +8617,28 @@
 
     /* ---- 日志交互 ---- */
     lDays.addEventListener('change', () => {
-      S.logDays = num(lDays.value) || 7;
+      if (lDays.value === 'custom') {
+        S.logDays = 'custom';
+        // 第一次切到自定义：默认给「近 7 天」，用户再改日期
+        if (!S.logFrom) S.logFrom = dayStr(dayStartMs(6));
+        if (!S.logTo) S.logTo = dayStr(dayStartMs(0));
+        lFrom.value = S.logFrom;
+        lTo.value = S.logTo;
+        syncRange();
+      } else {
+        S.logDays = num(lDays.value) || 7;
+      }
       persist();
       if (logAll.length) scanLogs();
     });
+    [lFrom, lTo].forEach((inp) =>
+      inp.addEventListener('change', () => {
+        S.logFrom = lFrom.value || '';
+        S.logTo = lTo.value || '';
+        persist();
+        if (logAll.length) scanLogs();
+      })
+    );
     lSort.addEventListener('change', () => {
       S.logSort = lSort.value;
       persist();
@@ -8625,6 +8760,8 @@
       }
       if (e.altKey && (e.key === 't' || e.key === 'T')) {
         e.preventDefault();
+        // 胶囊被收起来时先放出来：Alt+T 是隐藏之后唯一的退路，不能连它都点不到
+        if (S.fabHidden) toggleFab(false);
         togglePanel();
       } else if (e.key === 'Escape' && !panel.hidden) {
         togglePanel(false);
@@ -9822,7 +9959,15 @@ html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-c
 #grail .link_list .grail_list{justify-content:center !important}
 /* 新版个人圣殿页：一行 4 / 5 / 6 个（工具箱「圣殿」页控制）。
    站点用 ResizeObserver 写内联 grid-template-columns，只有 !important 压得住；
-   minmax(0,1fr) 防止卡片里的长名字把格子撑宽。 */
+   minmax(0,1fr) 防止卡片里的长名字把格子撑宽。
+   主力是下面那条结构选择器（:has）：站点每次重绘都会换掉节点，靠 JS 打 data 标记的话，
+   新节点要等下一轮 tick 才带上，中间那一拍先按站点自己的列数排、再跳回来——
+   打开 / 关掉塔图时闪的那一下就是这么来的。:has 让新节点一挂上就命中，同一帧生效。
+   两条规则必须分开写：不支持 :has 的浏览器会把整条规则连同它一起丢掉，
+   写在同一条里连 [data-tgtk-tcols] 这个兜底也没了。 */
+#tg-user-tinygrail div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col),
+#tg-modal div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col){
+  grid-template-columns:repeat(var(--tgtk-tcols,4),minmax(0,1fr)) !important}
 [data-tgtk-tcols]{grid-template-columns:repeat(var(--tgtk-tcols,4),minmax(0,1fr)) !important}
 /* 旧版 ICO「下一级」：仿新版的小号描边胶囊，摆在「追加注资请在下方输入金额」右边 */
 #grailBox .tgtk-iconext{display:inline-flex;align-items:center;justify-content:center;
@@ -15839,6 +15984,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         safeTick(pinInstallAll);
         safeTick(pinDecorTick);
         safeTick(pinRefreshSnaps);
+        // 右下角工具条里的开关：站点重画 dock 后自己补回去，顺带校正胶囊显隐
+        safeTick(mountDockSwitch);
+        safeTick(syncFabVisible);
         gxTopWeek().catch(() => {});
       } catch (e) {}
     };
@@ -15892,6 +16040,104 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       if (b === els.sRun) b.textContent = v ? '冲星中…' : '一键冲星';
       if (b === els.sdRun) b.textContent = v ? '充能中…' : '充能';
     });
+  }
+
+  /* --------------------- 工具箱胶囊的收 / 放 ---------------------
+     bgm 右下角那条工具条（官方 id 就是 dock）里挂一个开关：
+     点一下把胶囊收起来、再点一下放出来。收起是为了不让它挡住右下角的内容。
+     胶囊是唯一入口，所以必须留两条回来的路——开关本身和 Alt+T。
+     找不到工具条的页面（比如直接开 tinygrail.com）不提供隐藏：
+     没有入口的隐藏等于把人锁在门外。 */
+
+  /** bgm 右下角工具条；没有或还没排好版时返回 null */
+  function dockBar() {
+    let d = null;
+    try {
+      d = HDOC.getElementById('dock');
+    } catch (e) {
+      return null;
+    }
+    if (!d) return null;
+    try {
+      const r = d.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+    } catch (e) {
+      return null;
+    }
+    return d;
+  }
+
+  /** 按 S.fabHidden 同步胶囊显隐 + 开关的亮灭；页面没有开关入口时强制显示 */
+  function syncFabVisible() {
+    const fab = HDOC.getElementById('tgtk-fab');
+    if (!fab) return;
+    const hide = !!S.fabHidden && !!dockBar();
+    if (fab.hidden !== hide) fab.hidden = hide;
+    if (hide && els && els.panel && !els.panel.hidden) togglePanel(false);
+    const sw = HDOC.getElementById('tgtk-docksw');
+    if (sw) {
+      if (sw.classList.contains('tgtk-on') === hide) {
+        sw.classList.toggle('tgtk-on', !hide);
+        sw.classList.toggle('tgtk-off', hide);
+      }
+      const tip = (hide ? '显示' : '隐藏') + '工具箱（Alt+T）';
+      if (sw.title !== tip) sw.title = tip;
+    }
+  }
+
+  /** 收起 / 放出胶囊；force 省略 = 取反 */
+  function toggleFab(force) {
+    S.fabHidden = force === undefined ? !S.fabHidden : !!force;
+    persist();
+    syncFabVisible();
+  }
+
+  /** 把开关插进 bgm 右下角工具条；站点重画工具条时下一轮 tick 会自动补回去 */
+  function mountDockSwitch() {
+    if (HDOC.getElementById('tgtk-docksw')) return;
+    const dock = dockBar();
+    if (!dock) return;
+    const ul = dock.querySelector('ul') || dock;
+    const a = HDOC.createElement('a');
+    a.id = 'tgtk-docksw';
+    a.href = 'javascript:void(0);';
+    a.setAttribute('role', 'button');
+    a.title = '隐藏工具箱（Alt+T）';
+    // 小工具箱图标：stroke 用 currentColor，颜色自动跟随站点工具条的文字色
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = HDOC.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '17');
+    svg.setAttribute('height', '17');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.9');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    [
+      ['rect', { x: '3', y: '7.5', width: '18', height: '12', rx: '2.5' }],
+      ['path', { d: 'M9 7.5V5.6A1.6 1.6 0 0 1 10.6 4h2.8A1.6 1.6 0 0 1 15 5.6v1.9' }],
+      ['path', { d: 'M3 12.5h18' }],
+      ['path', { d: 'M10.5 12.5v2.2h3v-2.2' }],
+    ].forEach(([tag, attrs]) => {
+      const el = HDOC.createElementNS(NS, tag);
+      Object.keys(attrs).forEach((k) => el.setAttribute(k, attrs[k]));
+      svg.appendChild(el);
+    });
+    a.appendChild(svg);
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleFab();
+    });
+    const li = HDOC.createElement('li');
+    li.className = 'tgtk-dockitem';
+    li.appendChild(a);
+    // 插在「最后一项」之前：站点给 .last 做了右端圆角，挂在末尾会把那块圆角挤掉
+    const last = ul.querySelector('li.last') || ul.lastElementChild;
+    if (last && last.parentNode === ul) ul.insertBefore(li, last);
+    else ul.appendChild(li);
+    syncFabVisible();
   }
 
   function togglePanel(force) {
@@ -16074,12 +16320,23 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   font-size:9px;line-height:14px}
 .tgtk-sugmiss .tgtk-sugname{color:var(--tg-mute)}
 .tgtk-sugempty{padding:6px;color:var(--tg-mute);font-size:11px;line-height:1.5}
+/* 工具箱胶囊收进 bgm 右下角工具条（#dock）的开关：图标跟工具条文字色，收起时变淡。
+   #dock ul 是 flex，所以 li 也照站点的写法用 flex，别用 float/block，否则和旁边的图标对不齐 */
+#dock .tgtk-dockitem{display:flex;align-items:center;margin:0;padding:0;list-style:none}
+#tgtk-docksw{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+  background:none;border:0;color:inherit;opacity:.6;cursor:pointer;text-decoration:none;
+  transition:opacity .15s,color .15s}
+#tgtk-docksw:hover{opacity:1}
+#tgtk-docksw.tgtk-off{opacity:.3}
+#tgtk-docksw.tgtk-on{opacity:1;color:var(--tg-accent)}
 #tgtk-fab{position:fixed;right:18px;bottom:86px;z-index:2147483000;padding:8px 14px;border:0;border-radius:999px;
   background:var(--tg-accent);color:#fff;font:600 13px/1.4 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
   box-shadow:0 6px 18px rgba(228,111,161,.38);cursor:grab;opacity:.92;transition:transform .15s,opacity .15s;
   touch-action:none;user-select:none}
 #tgtk-fab.tgtk-dragging{cursor:grabbing;opacity:1}
 #tgtk-fab:hover{transform:translateY(-2px);opacity:1}
+/* 收起来时靠 !important 压过上面的 opacity / transition，别留个半透明的影子 */
+#tgtk-fab[hidden]{display:none!important}
 #tgtk-panel{position:fixed;right:18px;bottom:132px;z-index:2147483001;width:430px;max-width:calc(100vw - 24px);
   max-height:76vh;display:flex;flex-direction:column;background:var(--tg-bg);color:var(--tg-fg);border-radius:12px;
   box-shadow:0 18px 50px rgba(0,0,0,.45);font:13px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -16165,6 +16422,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-chk input[type=checkbox]{width:13px;height:13px;accent-color:var(--tg-accent);cursor:pointer;margin:0}
 .tgtk-chkline{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .tgtk-inline{display:flex;align-items:center;gap:4px;color:var(--tg-mute);font-size:11px}
+.tgtk-inline[hidden]{display:none}
+.tgtk-inline input[type="date"]{font:inherit;color:var(--tg-text);background:var(--tg-sunken);
+  border:1px solid var(--tg-line);border-radius:6px;padding:1px 4px;min-width:0;width:7.6em}
 /* 一键冲星按钮右边的「预计消耗活股」：跟着按钮走，不许把按钮挤换行 */
 .tgtk-estimate{flex:1;min-width:0;justify-content:flex-start;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tgtk-inline i{font-style:normal}
@@ -16612,6 +16872,12 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           const x = d.getElementById(id);
           if (x) x.remove();
         });
+        // 右下角工具条里那个开关挂在 bgm 的 dock 里，不在这批 id 里，单独摘掉（留个空 li 不好看）
+        d.querySelectorAll('#tgtk-docksw, .tgtk-dockitem').forEach((x) => {
+          const li = x.closest ? x.closest('li.tgtk-dockitem') : null;
+          if (li) li.remove();
+          else x.remove();
+        });
         d.querySelectorAll('.tgtk-sug,.tgtk-favpop,.tgtk-starpop,.tgtk-histpop').forEach((x) => x.remove());
       }
     } catch (e) {}
@@ -16650,7 +16916,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.17（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.21（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -16670,6 +16936,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         hideFavPop();
       },
     });
+    // 右下角工具条里的开关（工具条还没排好版就先挂着，tick 里会自动补装一次）
+    mountDockSwitch();
+    syncFabVisible();
     startStarBadge();
     // 旧版小圣杯页面增强（拍卖 / 圣殿 / 签到 / 小圣杯开关 / 萌王榜）也跟着页面常驻
     startGrailExtras();

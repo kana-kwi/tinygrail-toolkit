@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.17
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.21
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -156,12 +156,15 @@
     templeCols: 4, // 新版个人圣殿页：一行显示几个圣殿（4 / 5 / 6）
     templePins: [],
     templePinOn: true,
-    logDays: 7,
+    logDays: 7, // 数字 = 近 N 天；'custom' = 用下面两个日期
+    logFrom: '', // 自定义起始日 YYYY-MM-DD（含当天 0:00）
+    logTo: '', // 自定义结束日 YYYY-MM-DD（含当天 24:00）
     logSort: 'active',
     logTop: 20,
     ledgerView: 'fund',
     panelPos: null,
     fabPos: null,
+    fabHidden: false,
     panelOpen: false, // 面板是否打开：iframe 重载后据此自动恢复
     syncMode: 'code', // code = 仅同步码 / url = 自定义 GET·PUT 接口 / gist = GitHub 私密 Gist
     syncUrl: '',
@@ -296,6 +299,7 @@
   let fantasyRows = [];
   let favRows = [];
   let logAll = [];
+  let logWindow = null;
   let magicRunning = false;
   let starRunning = false;
   const starCapCache = Object.create(null); // 角色 → 塔的固资上限（读过一次就记住，用于消耗估算）
@@ -4911,6 +4915,54 @@
     return Number.isNaN(t) ? 0 : t;
   }
 
+  function dayStartMs(offset) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (offset || 0));
+    return d.getTime();
+  }
+
+  function fmtDay(ms) {
+    const d = new Date(num(ms));
+    return String(d.getMonth() + 1).padStart(2, '0') + '/' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function parseDayMs(v) {
+    const m = String(v || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  function dayStr(ms) {
+    const d = new Date(num(ms));
+    return (
+      d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+    );
+  }
+
+  function logRange() {
+    if (String(S.logDays) === 'custom') {
+      const f = parseDayMs(S.logFrom);
+      const t = parseDayMs(S.logTo);
+      if (f != null || t != null) {
+        const from = f != null ? f : t - 6 * 86400000;
+        let to = (t != null ? t : from) + 86400000;
+        if (to <= from) to = from + 86400000; // 起止填反了也给一天
+        return { from, to, days: Math.round((to - from) / 86400000), custom: true };
+      }
+    }
+    const days = Math.max(1, Math.min(90, Math.floor(num(S.logDays) || 7)));
+    return { from: dayStartMs(days - 1), to: dayStartMs(-1), days, custom: false };
+  }
+
+  function logRangeLabel(r) {
+    const g = r || logRange();
+    return g.custom ? `${fmtDay(g.from)} ~ ${fmtDay(g.to - 1)}（${g.days} 天）` : `近 ${g.days} 天`;
+  }
+
   function descCharaId(desc) {
     const m = String(desc || '').match(/#(\d+)/);
     return m ? num(m[1]) : 0;
@@ -5032,6 +5084,7 @@
     const hitMap = new Map();
     const auctionBack = { sum: 0, n: 0 }; // 竞拍失败返还，最后从「竞拍」支出里扣
     const buyBack = { sum: 0, n: 0 }; // 取消买入 / 冰山撤回的返还，最后从「买入」支出里扣
+    let scratchBuys = 0; // 刮刮乐「购买」次数（每次 -1000 cc 一条），用来当次数，别用奖励行数
 
     const add = (map, key, label, val, desc) => {
       let r = map.get(key);
@@ -5053,6 +5106,7 @@
       const rawAmt = x.Amount === undefined || x.Amount === null ? descAmount(desc) : x.Amount;
       const amt = num(rawAmt);
       const kind = classifyKind(desc, amt, ch, x.Type);
+      if (kind === 'scratch' && ch < 0) scratchBuys++;
 
       const put = (map, allowed, val) => {
         const k = allowed.includes(kind) ? kind : 'other';
@@ -5084,7 +5138,7 @@
       else if (amt < 0) put(buckets.stockOut, STOCK_OUT_KINDS, -amt);
 
       const fk = fixedKind(desc);
-      if (fk) {
+      if (fk && parseFixed(desc) > 0) {
         const fAmt = parseFixed(desc);
         const sAmt = parseFixedShares(desc);
         const gain = /获得|增加|补充|恢复|注入/.test(String(desc || ''));
@@ -5108,6 +5162,14 @@
         ccTs = ts;
       }
     });
+
+    if (scratchBuys > 0) {
+      const scRow = buckets.stockIn.get('scratch');
+      if (scRow) {
+        scRow.n = scratchBuys;
+        scRow.countBy = 'buy';
+      }
+    }
 
     const div = buckets.fundIn.get('dividend');
     if (tax.sum > 0 && div) {
@@ -5265,8 +5327,11 @@
     els.logList.textContent = '';
 
     try {
-      const days = Math.max(1, Math.min(90, Math.floor(num(S.logDays) || 7)));
-      const cutoff = Date.now() - days * 86400000;
+      const range = logRange();
+      const winFrom = range.from;
+      const winTo = range.to;
+      logWindow = range;
+      const cutoff = winFrom;
       let page = 1;
       let pages = 1;
       let reached = false;
@@ -5283,6 +5348,7 @@
             reached = true;
             break;
           }
+          if (ts && winTo && ts >= winTo) continue;
           logAll.push(items[i]);
         }
 
@@ -5391,11 +5457,15 @@
     const mv = holdAll.reduce((s, x) => s + num(x.UserAmount) * num(x.Current), 0);
     const cc = st.cc || (snaps.length ? snaps[snaps.length - 1].cc : 0);
 
-    const times = logAll.map((x) => logTs(x.LogTime)).filter(Boolean);
-    const span = times.length
-      ? `${new Date(Math.min(...times)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} ~ ` +
-        `${new Date(Math.max(...times)).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`
-      : '';
+    const win = logWindow;
+    const span = win
+      ? `${fmtDay(win.from)} 0:00 ~ ${fmtDay(win.to - 1)} 24:00`
+      : (() => {
+          const times = logAll.map((x) => logTs(x.LogTime)).filter(Boolean);
+          return times.length
+            ? `${fmtDay(Math.min(...times))} ~ ${fmtDay(Math.max(...times))}`
+            : '';
+        })();
 
     const { pts, label } = assetSeries();
     const first = pts.length ? num(pts[0].v) : 0;
@@ -5473,7 +5543,7 @@
 
     if (isFixed) {
       if (!st.hits.length) {
-        if (logAll.length) els.logList.appendChild(h('div', { class: 'tgtk-empty' }, '近 ' + num(S.logDays) + ' 天没有被虚空道标命中的记录'));
+        if (logAll.length) els.logList.appendChild(h('div', { class: 'tgtk-empty' }, logRangeLabel() + '没有被虚空道标命中的记录'));
         return;
       }
       els.logList.appendChild(
@@ -5545,7 +5615,7 @@
     const lines = [];
 
     if (view === 'fund') {
-      lines.push(`资金收支（近 ${num(S.logDays)} 天）`, '方向\t来源\t金额\t笔数');
+      lines.push(`资金收支（${logRangeLabel()}）`, '方向\t来源\t金额\t笔数');
       [
         ['收入', st.fundIn],
         ['支出', st.fundOut],
@@ -5560,7 +5630,7 @@
       const br = st.fundOut.rows.find((r) => r.key === 'buy' && r.refund);
       if (br) lines.push(`买入为净额：已扣除撤单 / 冰山退回 ${br.refund.toFixed(2)}（${br.refundN} 笔）`);
     } else if (view === 'stock') {
-      lines.push(`股数增减（近 ${num(S.logDays)} 天）`, '方向\t来源\t股数\t次数');
+      lines.push(`股数增减（${logRangeLabel()}）`, '方向\t来源\t股数\t次数');
       [
         ['获得', st.stockIn],
         ['损失', st.stockOut],
@@ -5574,7 +5644,7 @@
         lines.push([charaName(x.id) || '#' + x.id, x.gain, x.loss, x.gain - x.loss].join('\t'));
       });
     } else {
-      lines.push(`圣殿固资变动（近 ${num(S.logDays)} 天）`, '方向\t来源\t固资\t次数');
+      lines.push(`圣殿固资变动（${logRangeLabel()}）`, '方向\t来源\t固资\t次数');
       [
         ['损失', st.fixedOut],
         ['获得', st.fixedIn],
@@ -6646,9 +6716,27 @@
         ['7', '近 7 天'],
         ['14', '近 14 天'],
         ['30', '近 30 天'],
+        ['custom', '自定义'],
       ],
       String(S.logDays)
     );
+    const lFrom = h('input', {
+      id: 'tgtk-lfrom',
+      type: 'date',
+      value: S.logFrom || dayStr(dayStartMs(6)),
+      title: '起始日（含当天 0:00）',
+    });
+    const lTo = h('input', {
+      id: 'tgtk-lto',
+      type: 'date',
+      value: S.logTo || dayStr(dayStartMs(0)),
+      title: '结束日（含当天 24:00）',
+    });
+    const lRangeWrap = h('span', { class: 'tgtk-inline' }, lFrom, h('i', null, '~'), lTo);
+    const syncRange = () => {
+      lRangeWrap.hidden = String(S.logDays) !== 'custom';
+    };
+    syncRange();
     const lSort = select(
       'tgtk-lsort',
       [
@@ -6694,7 +6782,7 @@
       'div',
       { class: 'tgtk-view', 'data-view': 'log' },
       assetBox,
-      line('范围', lDays),
+      line('范围', lDays, lRangeWrap),
       segWrap,
       h('div', { class: 'tgtk-line tgtk-actions' }, lRun, lCopy),
       flowBox,
@@ -7545,10 +7633,27 @@
     startIcoTicker();
 
     lDays.addEventListener('change', () => {
-      S.logDays = num(lDays.value) || 7;
+      if (lDays.value === 'custom') {
+        S.logDays = 'custom';
+        if (!S.logFrom) S.logFrom = dayStr(dayStartMs(6));
+        if (!S.logTo) S.logTo = dayStr(dayStartMs(0));
+        lFrom.value = S.logFrom;
+        lTo.value = S.logTo;
+        syncRange();
+      } else {
+        S.logDays = num(lDays.value) || 7;
+      }
       persist();
       if (logAll.length) scanLogs();
     });
+    [lFrom, lTo].forEach((inp) =>
+      inp.addEventListener('change', () => {
+        S.logFrom = lFrom.value || '';
+        S.logTo = lTo.value || '';
+        persist();
+        if (logAll.length) scanLogs();
+      })
+    );
     lSort.addEventListener('change', () => {
       S.logSort = lSort.value;
       persist();
@@ -7660,6 +7765,7 @@
       }
       if (e.altKey && (e.key === 't' || e.key === 'T')) {
         e.preventDefault();
+        if (S.fabHidden) toggleFab(false);
         togglePanel();
       } else if (e.key === 'Escape' && !panel.hidden) {
         togglePanel(false);
@@ -8680,6 +8786,9 @@ html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-c
   box-shadow:0 8px 24px rgba(0,0,0,.3);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
 .tgtk-ttoast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 #grail .link_list .grail_list{justify-content:center !important}
+#tg-user-tinygrail div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col),
+#tg-modal div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col){
+  grid-template-columns:repeat(var(--tgtk-tcols,4),minmax(0,1fr)) !important}
 [data-tgtk-tcols]{grid-template-columns:repeat(var(--tgtk-tcols,4),minmax(0,1fr)) !important}
 #grailBox .tgtk-iconext{display:inline-flex;align-items:center;justify-content:center;
   box-sizing:border-box;width:auto !important;min-width:0 !important;height:20px !important;
@@ -14146,6 +14255,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         safeTick(pinInstallAll);
         safeTick(pinDecorTick);
         safeTick(pinRefreshSnaps);
+        safeTick(mountDockSwitch);
+        safeTick(syncFabVisible);
         gxTopWeek().catch(() => {});
       } catch (e) {}
     };
@@ -14197,6 +14308,91 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       if (b === els.sRun) b.textContent = v ? '冲星中…' : '一键冲星';
       if (b === els.sdRun) b.textContent = v ? '充能中…' : '充能';
     });
+  }
+
+  function dockBar() {
+    let d = null;
+    try {
+      d = HDOC.getElementById('dock');
+    } catch (e) {
+      return null;
+    }
+    if (!d) return null;
+    try {
+      const r = d.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+    } catch (e) {
+      return null;
+    }
+    return d;
+  }
+
+  function syncFabVisible() {
+    const fab = HDOC.getElementById('tgtk-fab');
+    if (!fab) return;
+    const hide = !!S.fabHidden && !!dockBar();
+    if (fab.hidden !== hide) fab.hidden = hide;
+    if (hide && els && els.panel && !els.panel.hidden) togglePanel(false);
+    const sw = HDOC.getElementById('tgtk-docksw');
+    if (sw) {
+      if (sw.classList.contains('tgtk-on') === hide) {
+        sw.classList.toggle('tgtk-on', !hide);
+        sw.classList.toggle('tgtk-off', hide);
+      }
+      const tip = (hide ? '显示' : '隐藏') + '工具箱（Alt+T）';
+      if (sw.title !== tip) sw.title = tip;
+    }
+  }
+
+  function toggleFab(force) {
+    S.fabHidden = force === undefined ? !S.fabHidden : !!force;
+    persist();
+    syncFabVisible();
+  }
+
+  function mountDockSwitch() {
+    if (HDOC.getElementById('tgtk-docksw')) return;
+    const dock = dockBar();
+    if (!dock) return;
+    const ul = dock.querySelector('ul') || dock;
+    const a = HDOC.createElement('a');
+    a.id = 'tgtk-docksw';
+    a.href = 'javascript:void(0);';
+    a.setAttribute('role', 'button');
+    a.title = '隐藏工具箱（Alt+T）';
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = HDOC.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '17');
+    svg.setAttribute('height', '17');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.9');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    [
+      ['rect', { x: '3', y: '7.5', width: '18', height: '12', rx: '2.5' }],
+      ['path', { d: 'M9 7.5V5.6A1.6 1.6 0 0 1 10.6 4h2.8A1.6 1.6 0 0 1 15 5.6v1.9' }],
+      ['path', { d: 'M3 12.5h18' }],
+      ['path', { d: 'M10.5 12.5v2.2h3v-2.2' }],
+    ].forEach(([tag, attrs]) => {
+      const el = HDOC.createElementNS(NS, tag);
+      Object.keys(attrs).forEach((k) => el.setAttribute(k, attrs[k]));
+      svg.appendChild(el);
+    });
+    a.appendChild(svg);
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleFab();
+    });
+    const li = HDOC.createElement('li');
+    li.className = 'tgtk-dockitem';
+    li.appendChild(a);
+    const last = ul.querySelector('li.last') || ul.lastElementChild;
+    if (last && last.parentNode === ul) ul.insertBefore(li, last);
+    else ul.appendChild(li);
+    syncFabVisible();
   }
 
   function togglePanel(force) {
@@ -14367,12 +14563,20 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   font-size:9px;line-height:14px}
 .tgtk-sugmiss .tgtk-sugname{color:var(--tg-mute)}
 .tgtk-sugempty{padding:6px;color:var(--tg-mute);font-size:11px;line-height:1.5}
+#dock .tgtk-dockitem{display:flex;align-items:center;margin:0;padding:0;list-style:none}
+#tgtk-docksw{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+  background:none;border:0;color:inherit;opacity:.6;cursor:pointer;text-decoration:none;
+  transition:opacity .15s,color .15s}
+#tgtk-docksw:hover{opacity:1}
+#tgtk-docksw.tgtk-off{opacity:.3}
+#tgtk-docksw.tgtk-on{opacity:1;color:var(--tg-accent)}
 #tgtk-fab{position:fixed;right:18px;bottom:86px;z-index:2147483000;padding:8px 14px;border:0;border-radius:999px;
   background:var(--tg-accent);color:#fff;font:600 13px/1.4 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
   box-shadow:0 6px 18px rgba(228,111,161,.38);cursor:grab;opacity:.92;transition:transform .15s,opacity .15s;
   touch-action:none;user-select:none}
 #tgtk-fab.tgtk-dragging{cursor:grabbing;opacity:1}
 #tgtk-fab:hover{transform:translateY(-2px);opacity:1}
+#tgtk-fab[hidden]{display:none!important}
 #tgtk-panel{position:fixed;right:18px;bottom:132px;z-index:2147483001;width:430px;max-width:calc(100vw - 24px);
   max-height:76vh;display:flex;flex-direction:column;background:var(--tg-bg);color:var(--tg-fg);border-radius:12px;
   box-shadow:0 18px 50px rgba(0,0,0,.45);font:13px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -14449,6 +14653,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-chk input[type=checkbox]{width:13px;height:13px;accent-color:var(--tg-accent);cursor:pointer;margin:0}
 .tgtk-chkline{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .tgtk-inline{display:flex;align-items:center;gap:4px;color:var(--tg-mute);font-size:11px}
+.tgtk-inline[hidden]{display:none}
+.tgtk-inline input[type="date"]{font:inherit;color:var(--tg-text);background:var(--tg-sunken);
+  border:1px solid var(--tg-line);border-radius:6px;padding:1px 4px;min-width:0;width:7.6em}
 .tgtk-estimate{flex:1;min-width:0;justify-content:flex-start;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tgtk-inline i{font-style:normal}
 .tgtk-inline input{width:62px;background:var(--tg-sunken2);border:1px solid var(--tg-line);color:var(--tg-fg);border-radius:5px;padding:3px 5px;font-size:12px;text-align:center;outline:none}
@@ -14850,6 +15057,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           const x = d.getElementById(id);
           if (x) x.remove();
         });
+        d.querySelectorAll('#tgtk-docksw, .tgtk-dockitem').forEach((x) => {
+          const li = x.closest ? x.closest('li.tgtk-dockitem') : null;
+          if (li) li.remove();
+          else x.remove();
+        });
         d.querySelectorAll('.tgtk-sug,.tgtk-favpop,.tgtk-starpop,.tgtk-histpop').forEach((x) => x.remove());
       }
     } catch (e) {}
@@ -14886,7 +15098,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.17（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.21（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -14905,6 +15117,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         hideFavPop();
       },
     });
+    mountDockSwitch();
+    syncFabVisible();
     startStarBadge();
     startGrailExtras();
     startIcoTicker();
