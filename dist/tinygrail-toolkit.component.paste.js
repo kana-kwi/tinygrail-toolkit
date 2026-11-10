@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.21
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.34
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -93,7 +93,7 @@
     {
       key: 'guidepost',
       label: '被道标命中',
-      test: (s) => s.includes('虚空道标') && (/受到|被|攻击|命中/.test(s) || !s.includes('使用')),
+      test: (s) => s.includes('虚空道标') && !/获得/.test(s) && /受到|被|你的圣殿/.test(s),
     },
     { key: 'star', label: '转化星之力', test: (s) => s.includes('星之力') || s.includes('灌注') },
     {
@@ -139,6 +139,7 @@
     sdFroms: [], // 燃料队列：按点选顺序依次消耗，总共扣「数量」那么多股
     sdAmount: 100,
     sdQuery: '',
+    sdSortAsc: false, // 燃料候选排序：false = 持股从多到少，true = 从少到多
     icoCfg: {}, // { [icoId]: { lv, on, cid, name, end, res, at } } 自动注资计划（含 ICO 元信息，换页面/重启也能独立判断）
     icoAdvance: 1, // 结束前多少分钟开始自动补款（提前设大一点，关机也不怕）
     gxAuction: true, // 角色页显示拍卖底价 / 数量 / 我的出价
@@ -306,6 +307,7 @@
   const starAssetCache = Object.create(null); // 角色 → 塔当前的固定资产（同上，估算用）
   let starEstimateRefresh = null; // buildUI 里注入：跑完一轮后重算「预计消耗」
   let sdHold = []; // 星光碎片：自己的全部持仓（候选燃料）
+  let sdTargetInfo = null; // 星光碎片：目标塔 { cid, lv, assets, cap }，用于「预计增加固资」
   let sdCacheNote = ''; // 复用了「持股」页缓存时的小提示
   let sdBusy = false;
   let sdRunning = false;
@@ -2283,6 +2285,10 @@
     );
   }
 
+  const TEMPLE_MIN_CAP = 500;
+  const templeBuilt = (t) => !!t && num(t.Sacrifices) >= TEMPLE_MIN_CAP;
+  let templeExcluded = 0; // 本轮扫描里被排除的未建成塔数量
+
   function dedupe(list) {
     const seen = new Set();
     return list.filter((t) => {
@@ -2362,13 +2368,20 @@
     busy = true;
     setButtonsDisabled(true);
     templeAll = [];
+    templeExcluded = 0;
     templeNameTried = Object.create(null);
     els.templeList.textContent = '';
     try {
       const data = await collectTemples();
-      templeAll = dedupe(Array.isArray(data) ? data : []);
+      const all = dedupe(Array.isArray(data) ? data : []);
+      templeAll = all.filter(templeBuilt);
+      templeExcluded = all.length - templeAll.length;
       renderTemples();
-      if (!templeAll.length) setTempleStatus('没有读到塔（该角色可能还没有人建塔）');
+      if (!templeAll.length) {
+        setTempleStatus(templeExcluded
+          ? `只找到 ${fmt(templeExcluded)} 座未建成塔（上限 < ${TEMPLE_MIN_CAP}），已全部排除`
+          : '没有读到塔（该角色可能还没有人建塔）');
+      }
     } catch (err) {
       setTempleStatus('出错：' + (err && err.message ? err.message : err));
     } finally {
@@ -2385,6 +2398,7 @@
     const useA = templeUseAssets();
     const useC = templeUseCover();
     const rows = templeAll.filter((t) => {
+      if (!templeBuilt(t)) return false; // 硬前提：兜一层，别让别处塞进来的未建成塔混进结果
       if (useA && !(num(t[key]) < num(S.threshold))) return false;
       if (useC) {
         const isDef = coverInfo(t).isDefault;
@@ -2414,6 +2428,7 @@
     const useC = templeUseCover();
     const coverName = S.cover === 'custom' ? '已换过塔图' : '未换塔图';
     let head = `共 ${templeAll.length} 座塔`;
+    if (templeExcluded) head += ` · 已排除 ${fmt(templeExcluded)} 座未建成（上限 < ${TEMPLE_MIN_CAP}）`;
     if (useA && useC) head += ` · 固定资产 < ${num(S.threshold)} ${coverName}：${rows.length} 座`;
     else if (useA) head += ` · 固定资产 < ${num(S.threshold)}：${under} 座`;
     else if (useC) head += ` · ${coverName}：${rows.length} 座`;
@@ -2447,7 +2462,7 @@
             h(
               'span',
               { class: 'tgtk-sub' },
-              `${t.Nickname || t.Name || '未知'} · 塔Lv${t.Level ?? 0}` +
+              `${t.Nickname || t.Name || '未知'} · 塔Lv${gxTempleLv(t)}` +
                 (t.CharacterLevel ? ` · 角色Lv${t.CharacterLevel}` : '') +
                 (ci.isDefault ? ' · 默认图' : ' · 已换图')
             )
@@ -2467,7 +2482,7 @@
         h(
           'div',
           { class: 'tgtk-empty' },
-          `只画了前 ${fmt(shown.length)} 座（共 ${fmt(rows.length)} 座）· 用上面的条件缩小范围，或点「复制」导出全部`
+          `只画了前 ${fmt(shown.length)} 座（共 ${fmt(rows.length)} 座）· 用上面的条件缩小范围，或点「复制」导出全部角色 ID`
         )
       );
     }
@@ -4192,11 +4207,15 @@
         if (toks.length) return toks.some((t) => charQueryHit(x, t));
         return lvOnly === null || sdLevel(x) === lvOnly;
       })
-      .sort(
-        (a, b) =>
-          num(b.UserAmount) - num(a.UserAmount) ||
-          String(a.CharacterId).localeCompare(String(b.CharacterId))
-      )
+      .sort((a, b) => {
+        const da = num(a.UserAmount) <= 0 ? 1 : 0;
+        const db = num(b.UserAmount) <= 0 ? 1 : 0;
+        if (da !== db) return da - db;
+        const d = S.sdSortAsc
+          ? num(a.UserAmount) - num(b.UserAmount)
+          : num(b.UserAmount) - num(a.UserAmount);
+        return d || String(a.CharacterId).localeCompare(String(b.CharacterId));
+      })
       .slice(0, toks.length ? SD_SEARCH_MAX : SD_LIST_MAX);
   }
 
@@ -4217,29 +4236,45 @@
   function sdPickText() {
     const q = sdQueue();
     if (!q.length) return '还没选燃料：点列表里的「选」加入队列（可多选，按点选顺序依次消耗）';
-    if (!sdHold.length) {
-      return `燃料队列 ${q.length} 只（点「读取持股」后可看每只可用股数）· 依次消耗：${q.map((id, i) => `${i + 1}.「${charaName(id)}」#${id}`).join(' → ')}`;
-    }
+    if (!sdHold.length) return `燃料队列 ${q.length} 只（点「读取持股」后可看每只可用股数）`;
     let sum = 0;
-    const bits = q.map((id, i) => {
+    q.forEach((id) => {
       const it = sdHold.find((x) => String(x.CharacterId) === id);
-      const sh = it ? Math.max(0, num(it.UserAmount)) : 0;
-      sum += sh;
-      const nm = (it && it.Name) || charaName(id);
-      return it
-        ? `${i + 1}.「${nm}」#${id} ${fmt(sh)} 股`
-        : `${i + 1}.#${id}（不在持仓里，点右侧 × 移出）`;
+      if (it) sum += Math.max(0, num(it.UserAmount));
     });
-    return `燃料队列 ${q.length} 只 · 可用合计 ${fmt(sum)} 股 · 依次消耗：${bits.join(' → ')}`;
+    return `燃料队列 ${q.length} 只 · 可用合计 ${fmt(sum)} 股 · 按点选顺序消耗`;
+  }
+
+  function sdShortName(nm) {
+    const s = String(nm || '');
+    return s.length > 6 ? s.slice(0, 6) + '…' : s;
+  }
+
+  function sdTargetLineText() {
+    const to = parseCharId(S.sdTarget);
+    if (!to) return '目标：还没填（填角色 ID 或点名，充能前读回等级 / 固资 / 上限）';
+    const nm = (sdTargetInfo && sdTargetInfo.name) || charaName(to);
+    if (!sdTargetInfo || String(sdTargetInfo.cid) !== String(to)) {
+      return `目标 #${to}「${nm}」· 正在读取等级 / 固资…`;
+    }
+    if (!sdTargetInfo.lv) return `目标 #${to}「${nm}」· 没读到等级，等会儿会自动重试`;
+    const cap = num(sdTargetInfo.cap);
+    const assets = num(sdTargetInfo.assets);
+    return `目标「${nm}」Lv${sdTargetInfo.lv} · 固资 ${fmt(assets)} / 上限 ${fmt(cap)}` +
+      (cap > 0 && assets >= cap ? ' · 已到上限' : '');
   }
 
   function renderSdPick() {
     if (!els || !els.sdPick) return;
     const box = els.sdPick;
     box.textContent = '';
-    box.appendChild(h('span', { class: 'tgtk-picktxt' }, sdPickText()));
+    box.appendChild(h('span', { class: 'tgtk-picktxt tgtk-sdtline' }, sdTargetLineText()));
     const q = sdQueue();
-    if (!q.length) return;
+    if (!q.length) {
+      renderSdEstimate();
+      return;
+    }
+    box.appendChild(h('span', { class: 'tgtk-picktxt' }, sdPickText()));
     const wrap = h('div', { class: 'tgtk-sdpicks' });
     q.forEach((id, i) => {
       const it = sdHold.find((x) => String(x.CharacterId) === id);
@@ -4248,7 +4283,7 @@
         h(
           'span',
           { class: 'tgtk-sdpick', title: `燃料队列第 ${i + 1} 只 ·「${nm}」#${id}` },
-          h('span', null, `${i + 1}. ${nm}`),
+          h('span', null, `${i + 1}. ${sdShortName(nm)}`),
           h(
             'button',
             { class: 'tgtk-sdpick-x', type: 'button', 'data-sdremove': id, title: `从队列移出 #${id}` },
@@ -4261,6 +4296,7 @@
       h('button', { class: 'tgtk-sdpick-clear', type: 'button', 'data-sdclear': '1' }, '清空队列')
     );
     box.appendChild(wrap);
+    renderSdEstimate();
   }
 
   function renderFuel() {
@@ -4320,12 +4356,17 @@
 
     const sum = rows.reduce((s, x) => s + num(x.UserAmount), 0);
     const dead = rows.filter((x) => num(x.UserAmount) <= 0).length;
+    const dir = S.sdSortAsc ? '少到多' : '多到少';
+    if (els.sdSort) {
+      els.sdSort.textContent = S.sdSortAsc ? '少→多' : '多→少';
+      els.sdSort.title = `燃料候选按持股${dir}排列（点一下切换）`;
+    }
     setSdStatus(
       sdHold.length
         ? `持仓 ${fmt(sdHold.length)} 只 · 显示 ${fmt(rows.length)} 只${lvOnly !== null ? ` · Lv${lvOnly}` : ''} · 合计 ${fmt(sum)} 股` +
             (dead ? ` · 其中 ${fmt(dead)} 只无活股` : '') +
             (sdCacheNote ? ` · ${sdCacheNote}` : '')
-        : '读取自己的全部持仓，按持股从多到少排列，最多显示 100 只'
+        : `读取自己的全部持仓，按持股从${dir}排列，最多显示 100 只`
     );
     renderSdPick();
   }
@@ -4365,18 +4406,100 @@
       const lv = await fetchTargetLevel(to);
       const t = await myTemple(to);
       if (!t) {
+        sdTargetInfo = null;
         setSdStatus(`#${to}「${charaName(to)}」不是你的圣殿（或未登录），无法作为目标`);
+        renderSdPick();
         return;
       }
-      pushSdLog(
-        h(
-          'div',
-          { class: 'tgtk-log tgtk-log-info' },
-          `目标「${t.Name || charaName(to)}」Lv${lv || '?'} · 固资 ${fmt(num(t.Assets))} / 上限 ${fmt(num(t.Sacrifices))}`
-        )
-      );
+      sdTargetInfo = {
+        cid: String(to), lv: lv || 0,
+        name: t.Name || charaName(to),
+        assets: num(t.Assets), cap: num(t.Sacrifices),
+      };
+      renderSdPick();
     } catch (e) {
     }
+  }
+
+  function sdGain(take, a, b) {
+    if (!(take > 0)) return 0;
+    if (a >= b - 1) return take;
+    const per = Math.min(32, Math.pow(2, b - a - 1));
+    return take / per;
+  }
+
+  function sdEstimate() {
+    const info = sdTargetInfo;
+    const q = sdQueue();
+    if (!info || !info.lv || !q.length) return null;
+    const b = Math.floor(info.lv);
+    const cap = num(info.cap);
+    const assets = num(info.assets);
+    let left = Math.max(1, Math.floor(num(S.sdAmount) || 1));
+    let gain = 0;
+    let used = 0;
+    const parts = [];
+    let blocked = 0; // 因为已经冲过上限而用不上的后续燃料只数
+    let hitCap = false;
+    for (let i = 0; i < q.length; i++) {
+      if (left <= 0) break;
+      const id = q[i];
+      const it = sdHold.find((x) => String(x.CharacterId) === id);
+      if (!it) continue;
+      const hold = Math.max(0, Math.floor(num(it.UserAmount)));
+      if (hold <= 0) continue;
+      const take = Math.min(left, hold);
+      const a = sdLevel(it);
+      const g = sdGain(take, a, b);
+      gain += g;
+      used += take;
+      left -= take;
+      parts.push({ id, name: it.Name || charaName(id), take, gain: g, lv: a });
+      if (cap > 0 && assets + gain >= cap) {
+        hitCap = true;
+        blocked = q.slice(i + 1).length;
+        break;
+      }
+    }
+    const atCap = cap > 0 && assets >= cap;
+    return { gain, used, left, lv: b, atCap, hitCap, blocked, parts, assets, cap };
+  }
+
+  function renderSdEstimate() {
+    if (!els || !els.sdEst) return;
+    const el = els.sdEst;
+    const to = parseCharId(S.sdTarget);
+    if (!to) {
+      el.textContent = '';
+      el.title = '';
+      return;
+    }
+    if (!sdTargetInfo || !sdTargetInfo.lv) {
+      el.textContent = '预计 +?';
+      el.title = '填好目标后会自动读回塔的等级 / 固资 / 上限，再给出估算';
+      return;
+    }
+    const e = sdEstimate();
+    if (!e) {
+      el.textContent = '预计 +0';
+      el.title = '先在列表里点「选」加几只燃料';
+      return;
+    }
+    if (e.atCap) {
+      el.textContent = '已到上限';
+      el.title = `目标固资 ${fmt(sdTargetInfo.assets)} / 上限 ${fmt(sdTargetInfo.cap)}：` +
+        '已经到/超过上限，补不进去了（超充只在「一次冲到上限之上」时有效）';
+      return;
+    }
+    el.textContent = `预计 +${fmt(e.gain)} 固资`;
+    const detail = e.parts.map((p) => `「${p.name}」Lv${p.lv} ${fmt(p.take)} 股 → +${fmt(p.gain)}`);
+    el.title = `目标 Lv${e.lv} · 预计消耗 ${fmt(e.used)} 股` +
+      (e.left > 0 ? `（燃料只够 ${fmt(e.used)} 股，还差 ${fmt(e.left)} 股）` : '') +
+      ` · 目标固资 ${fmt(e.assets)} / 上限 ${fmt(e.cap)}\n` +
+      (detail.length ? '逐只：' + detail.join('；') : '') +
+      (e.hitCap
+        ? `\n这一只充完就已经到/超过上限 ${fmt(e.cap)}，后面 ${fmt(e.blocked)} 只燃料用不上`
+        : '');
   }
 
   async function runStardust() {
@@ -4405,10 +4528,15 @@
     let left = amt;
     let used = 0;
     let failed = '';
+    let capStop = false; // 因为已经冲过上限而提前停（不是燃料不够）
     const touched = [];
+    const lvB = sdTargetInfo && sdTargetInfo.lv ? Math.floor(sdTargetInfo.lv) : 0;
+    const capNow = sdTargetInfo ? num(sdTargetInfo.cap) : 0;
+    let assetsNow = sdTargetInfo ? num(sdTargetInfo.assets) : 0;
 
     try {
       await loadNames(queue.concat([to]));
+      if (!sdTargetInfo || String(sdTargetInfo.cid) !== String(to)) await refreshSdTarget();
       const toName = charaName(to);
       log('info', `本次共消耗 ${fmt(amt)} 股 → 补充「${toName}」的固定资产 · 燃料队列 ${queue.length} 只，按顺序扣`);
 
@@ -4421,11 +4549,11 @@
           continue;
         }
         let hold = it ? num(it.UserAmount) : 0;
-        if (!it) {
-          try {
-            hold = num(await myShares(from));
-          } catch (e) {}
-        }
+        try {
+          const fresh = num(await myShares(from));
+          hold = fresh;
+          if (it) it.UserAmount = fresh;
+        } catch (e) {}
         if (hold <= 0) {
           log('warn', `第 ${i + 1} 只「${fromName}」没有可用活股（可能都挂了卖单），跳过`);
           continue;
@@ -4442,6 +4570,14 @@
           used += take;
           touched.push({ from, it, name: fromName });
           await sleep(350);
+          if (lvB && capNow > 0) {
+            assetsNow += sdGain(take, sdLevel(it), lvB);
+            if (assetsNow >= capNow && left > 0) {
+              capStop = true;
+              log('warn', `「${toName}」固资已经到/超过上限 ${fmt(capNow)}，后面的燃料用不上了，已停止`);
+              break;
+            }
+          }
         } catch (err) {
           failed = `第 ${i + 1} 只「${fromName}」失败：${err && err.message ? err.message : err}`;
           log('fail', failed + ' · 已停止，请核对后再继续');
@@ -4452,7 +4588,15 @@
       await sleep(500);
       try {
         const t = await myTemple(to);
-        if (t) log('info', `「${toName}」固资 ${fmt(num(t.Assets))} / 上限 ${fmt(num(t.Sacrifices))}`);
+        if (t) {
+          log('info', `「${toName}」固资 ${fmt(num(t.Assets))} / 上限 ${fmt(num(t.Sacrifices))}`);
+          sdTargetInfo = {
+            cid: String(to), lv: (sdTargetInfo && sdTargetInfo.cid === String(to) && sdTargetInfo.lv) || 0,
+            name: (sdTargetInfo && sdTargetInfo.name) || t.Name || charaName(to),
+            assets: num(t.Assets), cap: num(t.Sacrifices),
+          };
+          renderSdEstimate();
+        }
       } catch (e) {}
       for (let k = 0; k < touched.length; k++) {
         const s = touched[k];
@@ -4467,6 +4611,9 @@
 
       if (failed) {
         setSdStatus(`已消耗 ${fmt(used)} 股，中途停止：${failed}`);
+      } else if (capStop) {
+        log('ok', `本次合计消耗 ${fmt(used)} 股（已冲过上限，剩下的燃料未使用）`);
+        setSdStatus(`已充能「${toName}」：消耗 ${fmt(used)} 股，固资已到/超过上限`);
       } else if (left > 0) {
         log('warn', `队列里的燃料都用完了，还差 ${fmt(left)} 股：可以再多选几只燃料`);
         setSdStatus(`已充能「${toName}」：消耗 ${fmt(used)} 股（还差 ${fmt(left)} 股，燃料不够）`);
@@ -5129,7 +5276,10 @@
       }
 
       const ds = String(desc || '');
+      const isGuideHit = /虚空道标/.test(ds) && !/获得/.test(ds) && /受到|被|你的圣殿/.test(ds);
+
       if (/星之力/.test(ds)) {
+      } else if (isGuideHit) {
       } else if (kind === 'sell') {
         if (ch > 0 && amt) put(buckets.stockOut, STOCK_OUT_KINDS, Math.abs(amt));
       } else if (kind === 'sacrifice' && amt) {
@@ -5138,13 +5288,13 @@
       else if (amt < 0) put(buckets.stockOut, STOCK_OUT_KINDS, -amt);
 
       const fk = fixedKind(desc);
-      if (fk && parseFixed(desc) > 0) {
-        const fAmt = parseFixed(desc);
-        const sAmt = parseFixedShares(desc);
+      const fAmt = isGuideHit ? Math.abs(num(x.Amount)) || parseFixed(desc) : parseFixed(desc);
+      if (fk && fAmt > 0) {
+        const sAmt = isGuideHit ? 0 : parseFixedShares(desc);
         const gain = /获得|增加|补充|恢复|注入/.test(String(desc || ''));
         add(gain ? buckets.fixedIn : buckets.fixedOut, fk.key, fk.label, fAmt, desc);
         if (!gain && fk.key === 'guidepost') {
-          const hid = num(x.RelatedId) || descCharaId(desc);
+          const hid = descCharaId(desc) || num(x.RelatedId);
           if (hid) {
             const rec = hitMap.get(hid) || { id: hid, sum: 0, shares: 0, n: 0 };
             rec.sum += fAmt;
@@ -5736,7 +5886,9 @@
     tChars.value = S.chars;
     const tCtxChars = h('div', { class: 'tgtk-ctx', 'data-ctx': 'chars' }, tChars);
     const tRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '扫描');
-    const tCopy = h('button', { class: 'tgtk-btn', type: 'button' }, '复制');
+    const tCopy = h('button', {
+      class: 'tgtk-btn', type: 'button', title: '复制当前筛出的全部角色 ID（空格分隔）',
+    }, '复制');
     const templeStat = h('div', { class: 'tgtk-stat' }, '设置阈值后点扫描');
     const templeList = h('div', { class: 'tgtk-list' });
 
@@ -5785,6 +5937,8 @@
       h('div', { class: 'tgtk-tabs' }, srcBtns),
       tCtxChars,
       h('div', { class: 'tgtk-line tgtk-actions' }, tRun, tCopy),
+      h('div', { class: 'tgtk-note' },
+        `筛选前提：只统计已建成圣殿（固定资产上限 ≥ ${TEMPLE_MIN_CAP}）；上限不足的未建成塔会自动排除`),
       templeStat,
       templeList
     );
@@ -5807,7 +5961,9 @@
       S.sortBy
     );
     const hRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '扫描');
-    const hCopy = h('button', { class: 'tgtk-btn', type: 'button' }, '复制');
+    const hCopy = h('button', {
+      class: 'tgtk-btn', type: 'button', title: '复制当前筛出的全部角色 ID（空格分隔）',
+    }, '复制');
     const holdStat = h('div', { class: 'tgtk-stat' }, '读取自己的全部持仓，可按角色名 / ID、等级区间筛选');
     const holdList = h('div', { class: 'tgtk-list' });
 
@@ -5862,7 +6018,9 @@
       S.favSort
     );
     const favRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '刷新全部');
-    const favCopy = h('button', { class: 'tgtk-btn', type: 'button' }, '复制');
+    const favCopy = h('button', {
+      class: 'tgtk-btn', type: 'button', title: '只复制当前收藏夹里的角色 ID（空格分隔）',
+    }, '复制');
     const bFavPrune = h('button', {
       class: 'tgtk-btn tgtk-danger', type: 'button',
       title: '核对全部收藏，移除已退市（在小圣杯里显示为「未上市」/ #0）的角色；ST 角色会保留',
@@ -6165,6 +6323,11 @@
     const sdQuery = input('tgtk-sdquery', S.sdQuery || '', { placeholder: '角色名 / ID，多个用空格隔开' });
     const sdQueryFav = favBtn();
     const sdLoad = h('button', { class: 'tgtk-btn', type: 'button' }, '读取持股');
+    const sdSort = h(
+      'button',
+      { id: 'tgtk-sdsort', class: 'tgtk-btn tgtk-mini tgtk-sdsort', type: 'button', title: '切换燃料候选的排序' },
+      '多→少'
+    );
     const sdLevel = h('input', {
       id: 'tgtk-sdlevel',
       type: 'number',
@@ -6186,6 +6349,7 @@
       title: '这次合计消耗多少股；按燃料队列顺序依次扣，凑够就停',
     });
     const sdRun = h('button', { id: 'tgtk-sdrun', class: 'tgtk-btn tgtk-primary', type: 'button' }, '充能');
+    const sdEst = h('span', { id: 'tgtk-sdest', class: 'tgtk-sdest' }, '预计 +?');
     const sdLog = h('div', { class: 'tgtk-logbox' });
     const sdBox = h(
       'div',
@@ -6193,11 +6357,11 @@
       h('div', { class: 'tgtk-blocktitle' }, '星光碎片'),
       line('目标', sdTarget, sdTargetFav, h('span', { class: 'tgtk-inline' }, h('i', null, '自己的圣殿'))),
       line('等级', sdLevel, h('span', { class: 'tgtk-inline' }, h('i', null, '留空 = 全部'))),
-      h('div', { class: 'tgtk-line' }, h('span', { class: 'tgtk-label' }, '燃料'), sdQuery, sdQueryFav, sdLoad),
-      line('数量', sdAmount, h('span', { class: 'tgtk-inline' }, h('i', null, '股 · 依次扣')), sdRun),
+      h('div', { class: 'tgtk-line' }, h('span', { class: 'tgtk-label' }, '燃料'), sdQuery, sdQueryFav, sdLoad, sdSort),
+      line('数量', sdAmount, h('span', { class: 'tgtk-inline' }, h('i', null, '股 · 依次扣')), sdRun, sdEst),
+      sdPick,
       sdStat,
       sdList,
-      sdPick,
       sdLog
     );
 
@@ -6951,11 +7115,13 @@
       sdQuery,
       sdQueryFav,
       sdLoad,
+      sdSort,
       sdPick,
       sdList,
       sdStat,
       sdAmount,
       sdRun,
+      sdEst,
       sdLog,
       icoLoad,
       icoStat,
@@ -7541,7 +7707,11 @@
 
     sdTarget.addEventListener('input', () => {
       S.sdTarget = sdTarget.value;
+      if (String((sdTargetInfo && sdTargetInfo.cid) || '') !== String(parseCharId(sdTarget.value) || '')) {
+        sdTargetInfo = null;
+      }
       persist();
+      renderSdPick();
     });
     sdTarget.addEventListener('blur', async () => {
       const id = parseCharId(sdTarget.value);
@@ -7559,6 +7729,11 @@
       if (sdHold.length) renderFuel();
     });
     sdLoad.addEventListener('click', loadFuel);
+    sdSort.addEventListener('click', () => {
+      S.sdSortAsc = !S.sdSortAsc;
+      persist();
+      renderFuel();
+    });
     sdLevel.addEventListener('input', () => {
       const raw = String(sdLevel.value || '').trim();
       S.sdLevel = raw === '' ? '' : Math.max(0, Math.floor(num(raw)));
@@ -7597,9 +7772,11 @@
     sdAmount.addEventListener('input', () => {
       S.sdAmount = Math.max(1, Math.floor(num(sdAmount.value) || 1));
       persist();
+      renderSdEstimate();
     });
     sdAmount.addEventListener('blur', () => {
       sdAmount.value = String(Math.max(1, Math.floor(num(S.sdAmount) || 1)));
+      renderSdEstimate();
     });
     sdRun.addEventListener('click', runStardust);
 
@@ -7778,6 +7955,9 @@
     syncSource();
     syncMagic();
     renderSdPick();
+    if (S.sdTarget && !sdTargetInfo) {
+      try { refreshSdTarget(); } catch (e) {}
+    }
     if (icoRows.length) renderIco();
   }
 
@@ -8787,9 +8967,17 @@ html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-c
 .tgtk-ttoast.on{opacity:1;transform:translateX(-50%) translateY(0)}
 #grail .link_list .grail_list{justify-content:center !important}
 #tg-user-tinygrail div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col),
-#tg-modal div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col){
+#tg-modal div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col),
+[id^="tg-trade-box"] div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col),
+[id^="tg-character"] div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col),
+#tinygrail div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col){
   grid-template-columns:repeat(var(--tgtk-tcols,4),minmax(0,1fr)) !important}
 [data-tgtk-tcols]{grid-template-columns:repeat(var(--tgtk-tcols,4),minmax(0,1fr)) !important}
+html.tgtk-gx-size-s div.grid.w-full.gap-4:has(> :first-child.min-w-0.flex-col){
+  grid-template-columns:repeat(6,minmax(0,1fr)) !important}
+html.tgtk-gx-size-s [id^="tg-trade-box-temple"]:has(> [data-user-name]){
+  display:grid !important;grid-template-columns:repeat(6,minmax(0,1fr)) !important;
+  justify-items:center;gap:6px !important;margin-left:0;margin-right:0;zoom:1}
 #grailBox .tgtk-iconext{display:inline-flex;align-items:center;justify-content:center;
   box-sizing:border-box;width:auto !important;min-width:0 !important;height:20px !important;
   margin:0 0 0 8px !important;padding:0 9px !important;
@@ -8882,7 +9070,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       if (el.style.getPropertyValue('--tgtk-tcols') !== String(n)) {
         el.style.setProperty('--tgtk-tcols', String(n));
       }
-      const hosts = doc.querySelectorAll('#tg-user-tinygrail, #tg-modal');
+      const hosts = doc.querySelectorAll(
+        '#tg-user-tinygrail, #tg-modal, [id^="tg-trade-box"], [id^="tg-character"], #tinygrail'
+      );
       for (let i = 0; i < hosts.length; i++) {
         const grids = hosts[i].querySelectorAll('div.grid.w-full.gap-4');
         for (let j = 0; j < grids.length; j++) {
@@ -9148,20 +9338,48 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
     try {
       const v = await api(`chara/temple/${cid}`);
-      out.temples = Array.isArray(v) ? v : [];
+      out.temples = Array.isArray(v) ? v : (v && v.Items) || [];
     } catch (e) {}
     GX.cache[cid] = out;
     if (GX.busy === cid) GX.busy = '';
     return out;
   }
 
+  function gxTempleLv(t) {
+    const cap = num(t && t.Sacrifices);
+    if (cap >= 12500) return 3;
+    if (cap >= 2500) return 2;
+    if (cap > 0) return 1;
+    return Math.max(1, Math.min(3, num(t && t.Level) || 1));
+  }
+
   function gxTempleCounts(temples) {
     const cnt = { 1: 0, 2: 0, 3: 0 };
     (temples || []).forEach((t) => {
-      const lv = Math.max(1, Math.min(3, num(t.Level) || 1));
-      cnt[lv]++;
+      cnt[gxTempleLv(t)]++;
     });
     return cnt;
+  }
+
+  async function gxTempleList(cid) {
+    const out = [];
+    const seen = Object.create(null);
+    const push = (t) => {
+      if (!t) return;
+      const k = String(t.Id || (String(t.CharacterId) + '|' + String(t.UserId)));
+      if (seen[k]) return;
+      seen[k] = 1;
+      out.push(t);
+    };
+    try {
+      const v = await api(`chara/temple/${cid}`);
+      (Array.isArray(v) ? v : (v && v.Items) || []).forEach(push);
+    } catch (e) {}
+    try {
+      const v = await api(`chara/links/${cid}`);
+      (Array.isArray(v) ? v : (v && v.Items) || []).forEach(push);
+    } catch (e) {}
+    return out;
   }
 
   function gxCleanName(raw) {
@@ -9411,6 +9629,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
   function gxTempleCss(doc) {
     const sz = S.gxTempleSize === 's' ? 's' : S.gxTempleSize === 'l' ? 'l' : '';
+    try {
+      if (doc.documentElement) doc.documentElement.classList.toggle('tgtk-gx-size-s', sz === 's');
+    } catch (e) {}
     let st = null;
     try {
       st = doc.getElementById('tgtk-gx-temple-css');
@@ -9704,8 +9925,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       }
     } catch (e) {}
     try {
-      const v = await api(`chara/temple/${cid}`);
-      out.temples = Array.isArray(v) ? v : [];
+      out.temples = await gxTempleList(cid);
     } catch (e) {}
     GX.cache[key] = out;
     if (GX.busy === key) GX.busy = '';
@@ -10908,6 +11128,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           let hit = false;
           let templeDirty = false;
           let linkTouched = false;
+          const templeish = (n) => {
+            if (!n || n.nodeType !== 1) return false;
+            try {
+              if (n.hasAttribute && n.hasAttribute('data-user-name')) return true;
+              if (/temple/i.test(String(n.id || ''))) return true;
+              if (n.querySelector && n.querySelector('[data-user-name]')) return true;
+            } catch (e) {}
+            return false;
+          };
           for (const r of records) {
             if (r.type === 'attributes') {
               const at = r.target;
@@ -10924,7 +11153,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             for (const n of Array.from(r.removedNodes || [])) {
               if (n.nodeType !== 1) continue;
               if (n.hasAttribute && n.hasAttribute('data-tgtk')) continue;
-              if (n.hasAttribute && n.hasAttribute('data-user-name')) templeDirty = true;
+              if (templeish(n)) templeDirty = true;
               hit = true;
               break;
             }
@@ -10933,18 +11162,23 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
               if (n.nodeType !== 1) continue;
               if (/^tgtk-/.test(String(n.id || ''))) continue;
               if (n.hasAttribute && n.hasAttribute('data-tgtk')) continue;
-              if (n.hasAttribute && n.hasAttribute('data-user-name')) templeDirty = true;
+              if (templeish(n)) templeDirty = true;
               hit = true;
               break;
             }
             if (hit) break;
           }
           tgLinkPassSoon();
+          if (templeDirty) {
+            if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+            try { gxReapply(doc, true); } catch (e) {}
+            return;
+          }
           if (!hit || state.timer) return;
           state.timer = setTimeout(() => {
             state.timer = null;
-            gxReapply(doc, templeDirty);
-          }, templeDirty ? 0 : 40);
+            gxReapply(doc, false);
+          }, 40);
         });
         mo.observe(doc.body, {
           childList: true, subtree: true,
@@ -10963,6 +11197,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     linkInfo: {}, linkAsked: {}, owner: {},
   };
   const TGT_OSS = 'https://tinygrail.oss-cn-hangzhou.aliyuncs.com/';
+  const TGT_CDN = 'https://tinygrail.mange.cn/';
   const TGT_HIDE_CSS = 'html.tgtk-crop-open #tg-modal,' +
     'html.tgtk-crop-open [data-tgtk-crop-hide]' +
     '{visibility:hidden !important;opacity:0 !important;pointer-events:none !important}' +
@@ -11077,6 +11312,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M3.6 8.4h13.2"/><path d="M13.9 5.3l3.1 3.1-3.1 3.1"/>' +
     '<path d="M20.4 15.6H7.2"/><path d="M10.1 12.5l-3.1 3.1 3.1 3.1"/></svg>';
+  const TGT_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M8.2 5.6a1.1 1.1 0 0 1 1.7-.9l8.4 6.4a1.1 1.1 0 0 1 0 1.8l-8.4 6.4a1.1 1.1 0 0 1-1.7-.9z" ' +
+    'fill="currentColor"/></svg>';
+  const TGT_COVERLINK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M10.2 13.8l3.6-3.6"/>' +
+    '<path d="M9.1 10.6L7.4 12.3a3 3 0 0 0 4.3 4.3l1.7-1.7"/>' +
+    '<path d="M14.9 13.4l1.7-1.7a3 3 0 0 0-4.3-4.3l-1.7 1.7"/></svg>';
 
   function tgSwapList() {
     try {
@@ -11147,36 +11391,198 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return cn ? cn.querySelectorAll('span') : [];
   }
 
+  function tgLinkCanvas(el) {
+    if (!el) return null;
+    try {
+      const c = el.querySelector('canvas');
+      if (c && c.width && c.height) return c;
+    } catch (e) {}
+    return null;
+  }
+
+  function tgSnapCanvas(cv) {
+    if (!cv) return null;
+    try {
+      const doc = cv.ownerDocument || HDOC;
+      const c = doc.createElement('canvas');
+      c.width = cv.width;
+      c.height = cv.height;
+      c.getContext('2d').drawImage(cv, 0, 0);
+      return c;
+    } catch (e) { return null; }
+  }
+
+  function tgPaintCanvas(cv, src) {
+    if (!cv || !src) return;
+    try {
+      if (cv.width !== src.width || cv.height !== src.height) return; // 尺寸对不上就别硬拉伸
+      const ctx = cv.getContext('2d');
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      ctx.drawImage(src, 0, 0);
+    } catch (e) {}
+  }
+
+  function tgSwapCanvasNodes(cvA, cvB) {
+    try {
+      if (!cvA || !cvB || cvA === cvB || !cvA.parentNode || !cvB.parentNode) return false;
+      const doc = cvA.ownerDocument || HDOC;
+      const mark = doc.createComment('tgtk-swap');
+      cvA.parentNode.insertBefore(mark, cvA); // 先占住 A 的位置
+      cvB.parentNode.insertBefore(cvA, cvB);  // A 挪到 B 处
+      mark.parentNode.replaceChild(cvB, mark); // B 挪到 A 原来的位置
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function tgSwapHalfContents(L, R) {
+    try {
+      if (!L || !R || L === R) return false;
+      const doc = L.ownerDocument || HDOC;
+      const a = Array.prototype.slice.call(L.childNodes);
+      const b = Array.prototype.slice.call(R.childNodes);
+      const frag = doc.createDocumentFragment();
+      for (let i = 0; i < a.length; i++) frag.appendChild(a[i]);
+      for (let i = 0; i < b.length; i++) L.appendChild(b[i]);
+      R.appendChild(frag);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  const TG_LINK_ATTRS = ['data-character-id', 'data-user-id', 'data-name'];
+  function tgReadAttrs(el) {
+    const out = {};
+    if (!el) return out;
+    TG_LINK_ATTRS.forEach((k) => {
+      const v = el.getAttribute(k);
+      if (v != null) out[k] = v;
+    });
+    return out;
+  }
+  function tgWriteAttrs(el, attrs) {
+    if (!el || !attrs) return;
+    TG_LINK_ATTRS.forEach((k) => {
+      const v = attrs[k];
+      if (v == null) return;
+      if (el.getAttribute(k) !== v) el.setAttribute(k, v);
+    });
+  }
+
   function tgApplyLinkSwap(card, kind) {
     const s = tgLinkSides(card, kind);
     if (!s || !s.cidL || !s.cidR) return;
-    const want = tgSwapWant(s.cidL, s.cidR);
-    const need = !!want && want !== s.cidL;
 
     if (kind === 'new') {
-      if (!s.iL || !s.iR) return;
       if (!card.__tgtkLink) {
         const sp = tgSwapNameSpans(card, 'new');
         let bL = '', bR = '';
         try {
           const w = (card.ownerDocument && card.ownerDocument.defaultView) || HDOC.defaultView;
-          bL = w.getComputedStyle(s.iL).borderTopColor || '';
-          bR = w.getComputedStyle(s.iR).borderTopColor || '';
+          if (s.iL) bL = w.getComputedStyle(s.iL).borderTopColor || '';
+          if (s.iR) bR = w.getComputedStyle(s.iR).borderTopColor || '';
         } catch (e) {}
+        const cvL = tgLinkCanvas(s.L);
+        const cvR = tgLinkCanvas(s.R);
+        const imL0 = s.L.querySelector('img');
+        const imR0 = s.R.querySelector('img');
         card.__tgtkLink = {
-          bgL: s.iL.style.backgroundImage, bgR: s.iR.style.backgroundImage,
+          cidL: s.cidL, cidR: s.cidR,
+          aL: tgReadAttrs(s.L), aR: tgReadAttrs(s.R),
+          cvL, cvR,
+          imgL: tgSnapCanvas(cvL), imgR: tgSnapCanvas(cvR),
+          vL: s.L.firstElementChild, vR: s.R.firstElementChild,
+          srcL: imL0 ? String(imL0.getAttribute('src') || '') : '',
+          srcR: imR0 ? String(imR0.getAttribute('src') || '') : '',
+          ssL: imL0 ? String(imL0.getAttribute('srcset') || '') : '',
+          ssR: imR0 ? String(imR0.getAttribute('srcset') || '') : '',
+          dsL: imL0 ? String(imL0.getAttribute('data-src') || '') : '',
+          dsR: imR0 ? String(imR0.getAttribute('data-src') || '') : '',
+          alL: imL0 ? String(imL0.getAttribute('alt') || '') : '',
+          alR: imR0 ? String(imR0.getAttribute('alt') || '') : '',
+          bgL: s.iL ? s.iL.style.backgroundImage : '',
+          bgR: s.iR ? s.iR.style.backgroundImage : '',
           bL, bR,
           n1: sp && sp.length >= 2 ? sp[0].textContent : '',
           n2: sp && sp.length >= 2 ? sp[1].textContent : '',
         };
       }
       const nat = card.__tgtkLink;
-      const putBg = (el, v) => {
-        if (!v || !el) return;
-        if (el.style.backgroundImage !== v) el.style.backgroundImage = v;
-      };
-      putBg(s.iL, need ? nat.bgR : nat.bgL);
-      putBg(s.iR, need ? nat.bgL : nat.bgR);
+      const want = tgSwapWant(nat.cidL, nat.cidR);
+      const need = !!want && want !== nat.cidL;
+
+      const cvL = tgLinkCanvas(s.L) || nat.cvL;
+      const cvR = tgLinkCanvas(s.R) || nat.cvR;
+      if (cvL && cvR && cvL !== cvR) {
+        const known = (cvL === nat.cvL && cvR === nat.cvR) || (cvL === nat.cvR && cvR === nat.cvL);
+        if (!known) { nat.cvL = cvL; nat.cvR = cvR; }
+        const isSwapped = cvL === nat.cvR && cvR === nat.cvL;
+        if (need !== isSwapped) tgSwapCanvasNodes(cvL, cvR);
+      } else {
+        const imL = s.L.querySelector('img'), imR = s.R.querySelector('img');
+        if (imL && imR) {
+          const srcL = String(imL.getAttribute('src') || '');
+          const srcR = String(imR.getAttribute('src') || '');
+          const known = (srcL === nat.srcL && srcR === nat.srcR) ||
+            (srcL === nat.srcR && srcR === nat.srcL);
+          if (!known) { nat.srcL = srcL; nat.srcR = srcR; }
+          const wL = need ? nat.srcR : nat.srcL;
+          const wR = need ? nat.srcL : nat.srcR;
+          if (imL.getAttribute('src') !== wL) imL.setAttribute('src', wL);
+          if (imR.getAttribute('src') !== wR) imR.setAttribute('src', wR);
+          ['srcset', 'data-src', 'alt'].forEach((k) => {
+            const keyL = k === 'srcset' ? 'ssL' : k === 'data-src' ? 'dsL' : 'alL';
+            const keyR = k === 'srcset' ? 'ssR' : k === 'data-src' ? 'dsR' : 'alR';
+            let kl = nat[keyL], kr = nat[keyR];
+            const a = String(imL.getAttribute(k) || '');
+            const b = String(imR.getAttribute(k) || '');
+            const known = (a === kl && b === kr) || (a === kr && b === kl);
+            if (!known) { kl = a; kr = b; nat[keyL] = a; nat[keyR] = b; }
+            const wantL = need ? kr : kl;
+            const wantR = need ? kl : kr;
+            if (String(imL.getAttribute(k) || '') !== wantL) imL.setAttribute(k, wantL);
+            if (String(imR.getAttribute(k) || '') !== wantR) imR.setAttribute(k, wantR);
+          });
+        } else {
+          const bgEl = (half) => {
+            const all = half.querySelectorAll('*');
+            for (let i = 0; i < all.length; i++) {
+              const st = all[i].style && all[i].style.backgroundImage;
+              if (st && st !== 'none') return all[i];
+            }
+            return null;
+          };
+          const eL = bgEl(s.L), eR = bgEl(s.R);
+          if (eL && eR) {
+            const vL = eL.style.backgroundImage, vR = eR.style.backgroundImage;
+            const known = (vL === nat.bgL && vR === nat.bgR) ||
+              (vL === nat.bgR && vR === nat.bgL);
+            if (!known) { nat.bgL = vL; nat.bgR = vR; }
+            const wL = need ? nat.bgR : nat.bgL;
+            const wR = need ? nat.bgL : nat.bgR;
+            if (eL.style.backgroundImage !== wL) eL.style.backgroundImage = wL;
+            if (eR.style.backgroundImage !== wR) eR.style.backgroundImage = wR;
+          } else {
+            const vL = s.L.firstElementChild, vR = s.R.firstElementChild;
+            if (vL && vR && vL !== vR) {
+              const known = (vL === nat.vL && vR === nat.vR) ||
+                (vL === nat.vR && vR === nat.vL);
+              if (!known) { nat.vL = vL; nat.vR = vR; }
+              const isSwapped = vL === nat.vR && vR === nat.vL;
+              if (need !== isSwapped) tgSwapHalfContents(s.L, s.R);
+            } else {
+              const putBg = (el, v) => {
+                if (!v || !el) return;
+                if (el.style.backgroundImage !== v) el.style.backgroundImage = v;
+              };
+              putBg(s.L, need ? nat.bgR : nat.bgL);
+              putBg(s.R, need ? nat.bgL : nat.bgR);
+            }
+          }
+        }
+      }
+      tgWriteAttrs(s.L, need ? nat.aR : nat.aL);
+      tgWriteAttrs(s.R, need ? nat.aL : nat.aR);
+      const iL = s.L.firstElementChild || s.iL;
+      const iR = s.R.firstElementChild || s.iR;
       const setBd = (el, c) => {
         if (!el) return;
         if (c) {
@@ -11189,8 +11595,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             .forEach((p) => el.style.removeProperty(p));
         }
       };
-      setBd(s.iL, need ? nat.bR : '');
-      setBd(s.iR, need ? nat.bL : '');
+      setBd(iL, need ? nat.bR : '');
+      setBd(iR, need ? nat.bL : '');
       const sp = tgSwapNameSpans(card, 'new');
       if (sp && sp.length >= 2 && nat.n1 && nat.n2) {
         const w1 = need ? nat.n2 : nat.n1;
@@ -11264,13 +11670,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     btn = tgBtn('', '交换这两座 LINK 圣殿的左右顺序（本地记忆，角色页同步生效）', () => {
       const cur = tgLinkSides(card, kind);
       if (!cur || !cur.cidL || !cur.cidR) return;
-      let visLeft = cur.cidL;
-      let visRight = cur.cidR;
-      if (kind === 'new') {
-        const want = tgSwapWant(cur.cidL, cur.cidR);
-        if (want && want !== cur.cidL) { visLeft = cur.cidR; visRight = cur.cidL; }
-      }
-      tgSwapToggle(visLeft, visRight); // 记录「把现在的右边换到左边」
+      tgSwapToggle(cur.cidL, cur.cidR); // 记录「把现在的右边换到左边」
       tgLinkPass();
       tgToast('已交换 LINK 顺序（角色页同步生效）');
     }, TGT_SWAP);
@@ -11365,11 +11765,24 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
   function tgCoverUrl(root) {
     if (!root) return '';
-    const re = /cover\/[A-Za-z0-9_-]+\.jpe?g/;
+    const re = /cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i;
+    const abs = (v) => {
+      const s = String(v || '').trim();
+      if (!s) return '';
+      if (/^data:/i.test(s)) return ''; // 我们上传后的本地预览，不算
+      if (/^\/\//.test(s)) return 'https:' + s;
+      if (/^https?:\/\//i.test(s)) return s;
+      if (/^cover\//.test(s)) return TGT_OSS + s;
+      return '';
+    };
     try {
       for (const im of root.querySelectorAll('img')) {
-        const m = String(im.getAttribute('src') || '').match(re);
-        if (m) return TGT_OSS + m[0];
+        const raw = abs(im.getAttribute('src')) || abs(im.currentSrc);
+        if (raw && re.test(raw)) return raw;
+      }
+      for (const im of root.querySelectorAll('img[data-src]')) {
+        const raw = abs(im.getAttribute('data-src'));
+        if (raw && re.test(raw)) return raw;
       }
       for (const el of root.querySelectorAll('[style*="background"]')) {
         const m = String(el.style.backgroundImage || '').match(re);
@@ -11466,7 +11879,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   }
 
   function tgCidByCover(cover) {
-    const key = String(cover || '').match(/cover\/[A-Za-z0-9_-]+\.jpe?g/);
+    const key = String(cover || '').match(/cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i);
     if (!key) return '';
     for (const d of allDocs()) {
       let els = [];
@@ -11518,10 +11931,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       if (!/^\d+$/.test(cid)) cid = tgCidByCover(tgCoverUrl(det) || (TGT.last && TGT.last.cover) || '');
       if (!/^\d+$/.test(cid)) return null;
       const row = det.querySelector('#tg-temple-info-progress > div');
+      let uName = String(det.getAttribute('data-user-name') || '');
+      let uId = String(det.getAttribute('data-user-id') || '');
+      if (!uName || !uId) {
+        try {
+          const ue = det.querySelector('[data-user-name],[data-user-id]');
+          if (ue) {
+            if (!uName) uName = String(ue.getAttribute('data-user-name') || '');
+            if (!uId) uId = String(ue.getAttribute('data-user-id') || '');
+          }
+        } catch (e) {}
+      }
       return {
         doc, kind: 'new', root: det, host: row || det, cid,
-        uid: (TGT.last && TGT.last.uid) || '',
-        userName: (TGT.last && TGT.last.userName) || '',
+        uid: uId || (TGT.last && TGT.last.uid) || '',
+        userName: uName || (TGT.last && TGT.last.userName) || '',
         cover: tgCoverUrl(det) || (TGT.last && TGT.last.cover) || '',
         link: !!(TGT.last && TGT.last.link && String(TGT.last.cid || '') === String(cid)),
       };
@@ -11587,17 +12011,28 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
   function tgOwnerState(t) {
     const cidKey = String(t.cid || '');
-    const g = cidKey && TGT.owner[cidKey];
-    if (g) return g;
-    const memo = t.root && t.root.__tgtkOwner;
-    if (memo && memo.cid === cidKey) return memo.state;
+    const whoKey = String(t.uid || '') || String(t.userName || '').toLowerCase();
+    const memKey = cidKey + '|' + whoKey;
     const put = (v) => {
       if (v !== 'pending') {
-        try { t.root.__tgtkOwner = { cid: cidKey, state: v }; } catch (e) {}
-        if (cidKey) TGT.owner[cidKey] = v;
+        try { t.root.__tgtkOwner = { key: memKey, state: v }; } catch (e) {}
+        if (cidKey && whoKey) TGT.owner[memKey] = v;
       }
       return v;
     };
+    try {
+      if (t.kind === 'new' && t.root && t.root.querySelector) {
+        const acts = t.root.querySelector('#tg-temple-actions');
+        if (acts && acts.querySelector('button')) {
+          t.root.__tgtkOwner = { key: memKey, state: 'own' };
+          return 'own';
+        }
+      }
+    } catch (e) {}
+    const g = whoKey && TGT.owner[memKey];
+    if (g) return g;
+    const memo = t.root && t.root.__tgtkOwner;
+    if (memo && memo.key === memKey) return memo.state;
     const me = TGT.me || tgCachedMe();
     let ownerName = '';
     try {
@@ -11610,8 +12045,6 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       (me.name && name && me.name.toLowerCase() === name.toLowerCase());
     try {
       if (t.kind === 'new') {
-        const acts = t.root.querySelector && t.root.querySelector('#tg-temple-actions');
-        if (acts && acts.querySelector('button')) return put('own');
         if (domOther) return put('other');
         if (cachedOwn) return put('own');
         const age = t.root.__tgtkBornAt ? Date.now() - t.root.__tgtkBornAt : tgPopupAge(t);
@@ -11682,6 +12115,17 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       bar.textContent = '';
       bar.dataset.tgtkMode = mode;
       if (mode === 'own') {
+        bar.appendChild(tgBtn('', '复制当前塔图地址（.gif 会连动图一起带过去，可粘到别的塔的「图片地址」）', () => {
+          const t = tgCurrent() || found;
+          tgCopyCoverUrl(t);
+        }, TGT_COVERLINK));
+        if (kind === 'new') {
+          bar.appendChild(tgBtn('', '视频裁剪：把视频转成 GIF 动图（外部工具，新标签打开）', () => {
+            const w = (doc.defaultView || window);
+            try { w.open('https://fuyuake.top/xsb/link/crop', '_blank', 'noopener'); }
+            catch (e) { try { w.location.href = 'https://fuyuake.top/xsb/link/crop'; } catch (err) {} }
+          }, TGT_PLAY));
+        }
         bar.appendChild(tgBtn('', '自由裁剪后更换塔图（固定 3:4 竖图）', () => {
           const t = tgCurrent() || found;
           tgCropOpen({ doc: t.doc, kind: t.kind, cid: t.cid, uid: '', label: '我的圣殿' });
@@ -11695,6 +12139,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           const t = tgCurrent();
           if (t) tgModify(t);
         }));
+        bar.appendChild(tgBtn('', '复制当前塔图地址（.gif 会连动图一起带过去，可粘到别的塔的「图片地址」）', () => {
+          const t = tgCurrent();
+          if (t) tgCopyCoverUrl(t);
+        }, TGT_COVERLINK));
       }
     }
     bar.style.display = mode === 'pending' ? 'none' : '';
@@ -11784,12 +12232,98 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     }
   }
 
-  async function tgCopy(t) {
-    const cover = t.cover || (TGT.last && TGT.last.cover) || '';
-    if (!cover) return tgToast('没读到塔图地址，请重新点开这座塔');
-    if (!(HDOC.defaultView && HDOC.defaultView.confirm('把当前塔图复制到我的圣殿？'))) return;
+  function tgNormCover(u) {
+    let s = String(u || '').trim();
+    if (!s) return '';
+    if (/^cover\//.test(s)) s = TGT_OSS + s;
+    else if (/^\/\//.test(s)) s = 'https:' + s;
+    return s;
+  }
+
+  function tgCanonCover(u) {
+    const m = String(u || '').match(/cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i);
+    return m ? TGT_OSS + m[0] : '';
+  }
+
+  function tgCdnCover(u) {
+    const m = String(u || '').match(/cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i);
+    return m ? TGT_CDN + m[0] : '';
+  }
+
+  async function tgTempleCover(t) {
+    const cid = String((t && t.cid) || '');
+    if (!/^\d+$/.test(cid)) return '';
     try {
-      await api(`chara/temple/cover/${t.cid}`, { method: 'POST', body: JSON.stringify(cover) });
+      const v = await api('chara/temple/' + cid);
+      const arr = Array.isArray(v) ? v : ((v && v.Items) || []);
+      if (!arr.length) return '';
+      const uid = String((t && t.uid) || (TGT.last && TGT.last.uid) || '');
+      const name = String((t && t.userName) || (TGT.last && TGT.last.userName) || '').toLowerCase();
+      let hit = null;
+      if (uid) hit = arr.filter((x) => String(x.UserId || '') === uid)[0] || null;
+      if (!hit && name) {
+        hit = arr.filter((x) => String(x.Name || x.Nickname || '').toLowerCase() === name)[0] || null;
+      }
+      if (!hit && arr.length === 1) hit = arr[0];
+      return hit ? String(hit.Cover || '') : '';
+    } catch (e) { return ''; }
+  }
+
+  async function tgPostCover(cid, uid, cover) {
+    const path = uid ? `chara/temple/cover/${cid}/${uid}` : `chara/temple/cover/${cid}`;
+    await api(path, { method: 'POST', body: JSON.stringify(cover) });
+  }
+
+  async function tgCopyText(text) {
+    const s = String(text || '');
+    if (!s) return false;
+    const w = HDOC.defaultView || window;
+    try {
+      if (w.navigator && w.navigator.clipboard && w.navigator.clipboard.writeText) {
+        await w.navigator.clipboard.writeText(s);
+        return true;
+      }
+    } catch (e) {}
+    try {
+      const ta = HDOC.createElement('textarea');
+      ta.value = s;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0';
+      (HDOC.body || HDOC.documentElement).appendChild(ta);
+      ta.select();
+      try { ta.setSelectionRange(0, s.length); } catch (e) {}
+      const ok = HDOC.execCommand('copy');
+      ta.remove();
+      return !!ok;
+    } catch (e) { return false; }
+  }
+
+  async function tgCopyCoverUrl(t) {
+    let cover = tgNormCover(t.cover || (TGT.last && TGT.last.cover) || '');
+    if (!cover) {
+      tgToast('正在读取塔图地址…');
+      cover = tgNormCover(await tgTempleCover(t));
+    }
+    if (!cover) return tgToast('没读到塔图地址，请重新点开这座塔');
+    cover = tgCdnCover(cover) || cover;
+    const ok = await tgCopyText(cover);
+    const tail = String(cover).split('/').pop() || cover;
+    tgToast(ok
+      ? `塔图地址已复制（${tail}）· 换塔时粘进「图片地址」就行`
+      : `复制失败，请手动复制：${cover}`);
+  }
+
+  async function tgCopy(t) {
+    if (!(HDOC.defaultView && HDOC.defaultView.confirm('把当前塔图复制到我的圣殿？'))) return;
+    let cover = tgNormCover(t.cover || (TGT.last && TGT.last.cover) || '');
+    if (!cover) {
+      tgToast('正在读取塔图地址…');
+      cover = tgNormCover(await tgTempleCover(t));
+    }
+    if (!cover) return tgToast('没读到塔图地址，请重新点开这座塔');
+    cover = tgCanonCover(cover) || cover;
+    try {
+      await tgPostCover(t.cid, '', cover);
       tgToast('已复制到我的圣殿，刷新后生效');
     } catch (e) { tgToast('复制失败：' + (e && e.message ? e.message : e)); }
   }
@@ -11830,6 +12364,131 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         v === 'image/bmp' || v === 'image/avif' || v === 'image/svg+xml') return 'image/png';
     if (v === 'image/webp') return 'image/webp';
     return 'image/jpeg';
+  }
+
+  function tgDataUrlFile(dataUrl, mime, name) {
+    const p = String(dataUrl).split(',');
+    const bin = atob(p[1] || '');
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return new File([u8], name || 'tower.gif', { type: mime || 'image/gif' });
+  }
+
+  function tgHookFilePicker(win, file, state) {
+    const P = win && win.HTMLInputElement && win.HTMLInputElement.prototype;
+    if (!P || P.__tgtkPick) return false;
+    const origClick = P.click;
+    const origShow = P.showPicker;
+    const put = (input) => {
+      try {
+        const DT = win.DataTransfer;
+        if (!DT) return false;
+        const dt = new DT();
+        dt.items.add(file);
+        input.files = dt.files;
+        input.dispatchEvent(new win.Event('input', { bubbles: true }));
+        input.dispatchEvent(new win.Event('change', { bubbles: true }));
+        state.done = true;
+        return true;
+      } catch (e) { return false; }
+    };
+    const restore = () => {
+      try {
+        P.click = origClick;
+        if (origShow) P.showPicker = origShow;
+        delete P.__tgtkPick;
+      } catch (e) {}
+    };
+    P.click = function () {
+      if (this && String(this.type || '').toLowerCase() === 'file' && put(this)) {
+        win.setTimeout(restore, 0);
+        return;
+      }
+      return origClick.apply(this, arguments);
+    };
+    if (origShow) {
+      P.showPicker = function () {
+        if (this && String(this.type || '').toLowerCase() === 'file' && put(this)) {
+          win.setTimeout(restore, 0);
+          return;
+        }
+        return origShow.apply(this, arguments);
+      };
+    }
+    P.__tgtkPick = 1;
+    state.restore = restore;
+    return true;
+  }
+
+  function tgSiteGifUpload(target, out) {
+    const docs = [];
+    const td = (target && target.doc) || null;
+    if (td) docs.push(td);
+    for (const d of allDocs()) if (!docs.includes(d)) docs.push(d);
+    let input = null, btn = null;
+    const ours = (el) => !!(el && el.closest &&
+      el.closest('#tgtk-panel,#tgtk-crop,#tgtk-fab,#tgtk-ttoolbar,#tgtk-tlinkbar,[id^="tgtk-"]'));
+    for (const doc of docs) {
+      let det = null;
+      try { det = doc.querySelector('#tg-temple-detail') || doc.querySelector('#TB_window.temple'); } catch (e) {}
+      const scopes = det ? [det, doc] : [doc];
+      for (const s of scopes) {
+        if (!input) {
+          const list = s.querySelectorAll('input[type="file"]');
+          for (let i = 0; i < list.length; i++) {
+            const el = list[i];
+            if (ours(el)) continue;
+            input = el;
+            break;
+          }
+        }
+        if (!btn) {
+          const list = s.querySelectorAll('button');
+          for (let i = 0; i < list.length; i++) {
+            const el = list[i];
+            if (ours(el)) continue;
+            const txt = String(el.textContent || '').replace(/\s+/g, '');
+            if (!/修改|更换|上传|选择图片/.test(txt)) continue;
+            if (det && !det.contains(el) && !el.closest('#tg-temple-actions,.action')) continue;
+            btn = el;
+            break;
+          }
+        }
+      }
+      if (input || btn) break;
+    }
+    if (!input && !btn) return false; // 找不到站点入口：留给工具箱兜底，浮层先别关
+    tgCropClose();
+    const file = out.file || tgDataUrlFile(out.dataUrl, out.mime, 'tower.gif');
+    if (input) {
+      try {
+        const w = input.ownerDocument.defaultView || window;
+        const DT = w.DataTransfer;
+        if (DT) {
+          const dt = new DT();
+          dt.items.add(file);
+          input.files = dt.files;
+          input.dispatchEvent(new w.Event('input', { bubbles: true }));
+          input.dispatchEvent(new w.Event('change', { bubbles: true }));
+          tgToast('已交给小圣杯上传 GIF（会保留动画）');
+          return true;
+        }
+      } catch (e) {}
+    }
+    if (btn) {
+      const w = btn.ownerDocument.defaultView || window;
+      const state = { done: false, restore: null };
+      try { tgHookFilePicker(w, file, state); } catch (e) {}
+      try {
+        btn.click(); // 用户手势内触发；站点弹出的文件框会被上面的钩子接住
+      } catch (e) {}
+      w.setTimeout(() => {
+        if (state.restore) state.restore();
+        if (!state.done) tgToast('请在小圣杯弹出的选图框里再选一次这张 GIF（站点上传才会保留动画）');
+      }, 2500);
+      return true;
+    }
+    return false;
   }
 
   async function tgUpload(cid, uid, dataUrl, mime) {
@@ -11894,7 +12553,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     gxStyle(cropDoc);
     const mkSt = () => ({
       img: null, fit: null, box: null, drag: null,
-      outMime: 'image/jpeg', rawDataUrl: '', rawMime: '',
+      outMime: 'image/jpeg', rawDataUrl: '', rawMime: '', rawFile: null,
+      animated: false, rawUrl: '',
+      srcUrl: '', srcRaw: '',
+      touched: false,
+      urlOnly: false,
     });
     const SIDES = { self: mkSt(), link: mkSt() };
     const st = SIDES.self;
@@ -11903,7 +12566,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const normCover = (u) => {
       const raw = String(u || '');
-      const m = raw.match(/cover\/[A-Za-z0-9_-]+\.jpe?g/);
+      const m = raw.match(/cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i);
       if (m) return TGT_OSS + m[0];
       return raw.replace(/^\/\//, 'https://');
     };
@@ -11964,8 +12627,20 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       return { sx, sy, sw, sh, w, h, raw };
     };
     const mimeOf = (s) => (s || st).outMime === 'image/png' ? 'PNG 无损' :
-      (s || st).outMime === 'image/webp' ? 'WebP' : 'JPEG 质量 100';
+      (s || st).outMime === 'image/webp' ? 'WebP' :
+      (s || st).outMime === 'image/gif' ? 'GIF 动图（走小圣杯上传）' : 'JPEG 质量 100';
     const refreshTip = () => {
+      if (st.animated) {
+        tip.textContent = 'GIF 动图无法裁剪，将交给小圣杯自己的上传通道（保留动画）' +
+          (st.rawUrl ? ' · 按原地址提交' : ' · 原文件直交') +
+          (link ? '；LINK 拼图不支持动图，请换静态图' : '');
+        return;
+      }
+      if (st.urlOnly) {
+        tip.textContent = '这是小圣杯自己的封面地址：点「确定并更换」会按原地址提交（不重编码、画质不损失）' +
+          (link ? '；LINK 拼图要切成两半，请改用本地图片' : '');
+        return;
+      }
       const o = outSize();
       if (!o) return;
       const which = curHalf === 'right' ? '右半' : '左半';
@@ -11994,6 +12669,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       ctx.fillRect(0, 0, W, H);
       const f = st.fit;
       ctx.drawImage(st.img, f.x, f.y, f.w, f.h);
+      if (st.animated) return; // 动图不画裁剪框：框了也裁不出来
       const b = st.box;
       if (!b) return;
       ctx.fillStyle = 'rgba(0,0,0,.55)';
@@ -12052,46 +12728,102 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       draw();
     };
 
-    const load = (src, cross, side) => {
+    const load = (src, cross, side) => new Promise((resolve) => {
       const dst = side || st; // 记下这一次要写入哪一侧，避免切页签后把图写到另一边
       const Img = (cropDoc.defaultView && cropDoc.defaultView.Image) ||
         (HDOC.defaultView && HDOC.defaultView.Image) || window.Image;
       const im = new Img();
-      if (cross) im.crossOrigin = 'anonymous';
+      if (cross) {
+        im.crossOrigin = 'anonymous';
+        try { im.referrerPolicy = 'no-referrer'; } catch (e) {}
+      }
       im.onload = () => {
         const iw = im.naturalWidth || im.width || 0;
         const ih = im.naturalHeight || im.height || 0;
-        if (!iw || !ih) { tip.textContent = '图片尺寸读取失败'; return; }
+        if (!iw || !ih) { tip.textContent = '图片尺寸读取失败'; resolve(false); return; }
         const W = cvs.width, H = cvs.height;
         const scale = Math.min(W / iw, H / ih);
         const dw = iw * scale, dh = ih * scale;
         dst.img = im;
         dst.fit = { x: (W - dw) / 2, y: (H - dh) / 2, w: dw, h: dh };
         dst.box = null;
-        if (dst !== st) return; // 已经切到另一侧：静默存下即可
+        dst.touched = false; // 新图进来算「没动过裁剪框」
+        if (dst !== st) { resolve(true); return; } // 已经切到另一侧：静默存下即可
+        range.disabled = !!st.animated || !!st.urlOnly;
+        if (st.animated) { draw(); refreshTip(); resolve(true); return; }
+        if (st.urlOnly) { draw(); refreshTip(); resolve(true); return; }
         sizeBox(Number(range.value || 100) / 100);
         refreshTip();
+        resolve(true);
       };
-      im.onerror = () => { tip.textContent = '图片加载失败，换一张或改用本地文件'; };
+      im.onerror = () => {
+        if (dst.animated && dst.rawUrl) {
+          tip.textContent = '预览被跨域拦住了，地址已记录，可以直接点「确定并更换」';
+          resolve(false);
+          return;
+        }
+        tip.textContent = dst.srcUrl
+          ? '这串地址在本地读不到像素（小圣杯封面只对自家站点开放），' +
+            '但地址已记下，点「确定并更换」会直接按原地址提交'
+          : '图片加载失败，换一张或改用本地文件';
+        resolve(false);
+      };
       im.src = src;
       if (im.complete && im.naturalWidth && im.onload) im.onload();
+    });
+
+    const applyUrl = (v, wait) => {
+      const raw = tgNormCover(String(v || '').trim());
+      if (!raw) return Promise.resolve(false);
+      const dst = st;
+      const canon = tgCanonCover(raw);
+      const u = canon || raw;
+      dst.srcUrl = u;
+      dst.srcRaw = raw;
+      dst.urlOnly = !!canon;
+      const gif = isGifUrl(u);
+      dst.animated = gif;
+      dst.rawUrl = gif && !/^data:/i.test(u) ? u : '';
+      dst.rawDataUrl = gif && /^data:/i.test(u) ? u : '';
+      dst.rawFile = null;
+      dst.rawMime = gif ? 'image/gif' : '';
+      dst.outMime = gif ? 'image/gif' : tgOutMime(guessMime(u));
+      const preview = canon ? tgCdnCover(canon) : raw;
+      const p = load(preview, canon ? false : !/^data:/i.test(raw), dst);
+      return (gif || canon) ? Promise.resolve(false) : p;
+    };
+
+    const ensureUrl = async () => {
+      const raw = String(urlIn.value || '').trim();
+      if (!raw) return false;
+      if (!/^(https?:)?\/\//i.test(raw) && !/^data:image\//i.test(raw) && !/^cover\//.test(raw)) return false;
+      const norm = tgCanonCover(tgNormCover(raw)) || tgNormCover(raw);
+      if (norm === st.srcUrl && (st.img || st.animated)) return !!st.img;
+      return await applyUrl(raw, true);
     };
 
     const guessMime = (u) => /\.(png|apng)(\?|#|$)/i.test(String(u)) ? 'image/png' :
       /\.(webp)(\?|#|$)/i.test(String(u)) ? 'image/webp' : 'image/jpeg';
+    const isGifUrl = (u) => /^data:image\/gif[;,]/.test(String(u)) || /\.gif(?:[?#]|$)/i.test(String(u));
     const isImageFile = (f) => !!f && (/^image\//.test(String(f.type || '')) ||
       /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(String(f.name || '')));
 
     const useLocalFile = (f) => {
       if (!isImageFile(f)) return tgToast('请拖入 / 选择图片文件');
       const dst = st;
+      const gif = /^image\/gif$/i.test(String(f.type || '')) || /\.gif$/i.test(String(f.name || ''));
       const FR = (cropDoc.defaultView && cropDoc.defaultView.FileReader) || FileReader;
       const rd = new FR();
       rd.onload = () => {
         const raw = String(rd.result);
         dst.rawDataUrl = raw;
         dst.rawMime = (raw.match(/^data:([^;]+);/) || [null, 'image/jpeg'])[1];
-        dst.outMime = tgOutMime(f.type || dst.rawMime);
+        dst.rawFile = f;
+        dst.animated = gif;
+        dst.rawUrl = '';
+        dst.srcUrl = '';
+        dst.srcRaw = '';
+        dst.outMime = gif ? 'image/gif' : tgOutMime(f.type || dst.rawMime);
         load(raw, false, dst);
       };
       rd.onerror = () => tgToast('图片读取失败');
@@ -12113,10 +12845,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       catch (e) {}
       u = u.trim().split('\n')[0].trim();
       if (/^(https?:)?\/\//i.test(u) || /^data:image\//i.test(u)) {
-        const dst = st;
-        dst.rawDataUrl = '';
-        dst.outMime = tgOutMime(guessMime(u));
-        load(u, !/^data:/i.test(u), dst);
+        urlIn.value = u;
+        applyUrl(u);
       } else tgToast('没读到图片，试试直接拖本地图片文件');
     };
 
@@ -12124,12 +12854,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     urlIn.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter') return;
       e.preventDefault();
-      const v = String(urlIn.value || '').trim();
-      if (!v) return;
-      const dst = st;
-      dst.rawDataUrl = '';
-      dst.outMime = tgOutMime(guessMime(v));
-      load(v, true, dst);
+      applyUrl(urlIn.value);
+    });
+    const urlOk = (v) => /^(https?:)?\/\//i.test(v) || /^data:image\//i.test(v) || /^cover\//.test(v);
+    urlIn.addEventListener('paste', () => {
+      (cropDoc.defaultView || window).setTimeout(() => {
+        const v = String(urlIn.value || '').trim();
+        if (urlOk(v)) applyUrl(v);
+      }, 0);
+    });
+    urlIn.addEventListener('blur', () => {
+      const v = tgNormCover(String(urlIn.value || '').trim());
+      if (!v || v === st.srcRaw) return;
+      if (urlOk(v)) applyUrl(v);
     });
     range.addEventListener('input', () => {
       if (st.fit) sizeBox(Number(range.value || 100) / 100);
@@ -12145,7 +12882,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       };
     };
     cvs.addEventListener('pointerdown', (e) => {
-      if (!st.box) return;
+      if (st.animated || st.urlOnly || !st.box) return;
       const p = pos(e), b = st.box;
       const corner = Math.abs(p.x - (b.x + b.w)) < 16 && Math.abs(p.y - (b.y + b.h)) < 16;
       if (corner) st.drag = { mode: 'size', sx: p.x, w: b.w };
@@ -12185,7 +12922,20 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const exportData = (s) => {
       s = s || st;
-      if (!s.img || !s.fit || !s.box) throw new Error('请先选择图片');
+      if (s.animated) {
+        const iw = (s.img && (s.img.naturalWidth || s.img.width)) || 0;
+        const ih = (s.img && (s.img.naturalHeight || s.img.height)) || 0;
+        if (s.rawDataUrl) {
+          return {
+            dataUrl: s.rawDataUrl, mime: s.rawMime || 'image/gif',
+            w: iw, h: ih, animated: true, file: s.rawFile || null,
+          };
+        }
+        if (s.rawUrl) return { url: s.rawUrl, mime: 'image/gif', w: iw, h: ih, animated: true };
+        throw new Error('GIF 读取失败，请重新选择文件');
+      }
+      if (!s.img || !s.fit) throw new Error('请先选择图片');
+      if (!s.box) throw new Error('请先选择图片');
       const o = outSize(s);
       if (!o) throw new Error('请先选择图片');
       if (o.raw) return { dataUrl: s.rawDataUrl, mime: s.rawMime, w: o.w, h: o.h };
@@ -12206,8 +12956,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const ok = tgBtn('确定并更换', '按所选画质导出后上传', async () => {
       ok.disabled = true;
       try {
+        try { await ensureUrl(); } catch (e) {}
         if (link) {
           if (!st.img) throw new Error('请先选择一张拼图');
+          if (st.urlOnly) throw new Error('LINK 拼图要切成两半，小圣杯封面地址没法切，请改用本地图片');
+          if (st.animated) throw new Error('LINK 拼图要切成两半，GIF 动图做不到，请换静态图片');
           const other = curHalf === 'left' ? 'right' : 'left';
           const wantOther = !!(chk.checked && partnerMine);
           const a = exportHalf(st, curHalf);
@@ -12234,15 +12987,57 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           return;
         }
 
-        if (!SIDES.self.img) throw new Error('请先选择图片');
+        const selfSide = SIDES.self;
+        const canonSelf = tgCanonCover(selfSide.srcUrl);
+        if (canonSelf && !selfSide.animated) {
+          tip.textContent = '正在按原地址提交…';
+          await tgPostCover(target.cid, target.uid, canonSelf);
+          tgToast('塔图已更换（原地址提交），刷新页面就能看到新图');
+          tgCropClose();
+          ok.disabled = false;
+          return;
+        }
+        if (!selfSide.img && !(selfSide.animated && selfSide.rawUrl)) {
+          throw new Error('还没选图：点左边「选择文件」，或在「图片地址」里粘链接');
+        }
         const out = exportData(SIDES.self);
-        tip.textContent = '正在上传…（' + out.w + '×' + out.h + '）';
-        await tgUpload(target.cid, target.uid, out.dataUrl, out.mime);
+        let ownActs = false;
+        try {
+          ownActs = !!(
+            (target.root && target.root.querySelector &&
+              target.root.querySelector('#tg-temple-actions')) ||
+            (target.doc && target.doc.querySelector &&
+              target.doc.querySelector('#tg-temple-detail #tg-temple-actions')) ||
+            (target.kind === 'old' && target.doc && target.doc.querySelector &&
+              target.doc.querySelector('#TB_window.temple input[type="file"],#TB_window.temple .modify'))
+          );
+        } catch (e) {}
+        if (out.url) {
+          tip.textContent = '正在提交原图地址…（' + (out.w ? out.w + '×' + out.h : '原图') + '）';
+          await tgPostCover(target.cid, target.uid, out.url);
+        } else if (out.animated && tgSiteGifUpload(target, out)) {
+          ok.disabled = false;
+          return;
+        } else if (out.animated && target.uid && !ownActs) {
+          throw new Error('小圣杯没给别人的塔留 GIF 上传入口（只有自己塔上的「修改」才能传动图），请改用静态图');
+        } else if (out.animated) {
+          tip.textContent = 'GIF 上传入口没接住，改按静态图上传（只保留第一帧）…';
+          await tgUpload(target.cid, target.uid, out.dataUrl, out.mime);
+          tgToast('已按静态图上传：GIF 动图请用站点自己的「修改」换');
+          tgCropClose();
+          ok.disabled = false;
+          return;
+        } else {
+          tip.textContent = out.animated
+            ? '站点上传入口没找到，改用工具箱直传…'
+            : '正在上传…（' + out.w + '×' + out.h + '）';
+          await tgUpload(target.cid, target.uid, out.dataUrl, out.mime);
+        }
         try {
           const im = target.kind === 'old'
             ? target.doc.querySelector('#TB_window.temple img.cover')
             : target.doc.querySelector('#tg-temple-detail img');
-          if (im) im.src = out.dataUrl;
+          if (im && out.dataUrl) im.src = out.dataUrl;
         } catch (e) {}
         tgToast('塔图已更换，刷新后完全生效');
         tgCropClose();
@@ -13316,7 +14111,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     '<path d="M4.9 11.1 2.2 13.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg>';
 
   function pinCoverKey(url) {
-    const m = /\/cover\/([0-9a-zA-Z]+)\.(?:jpe?g|png|webp)/i.exec(String(url || ''));
+    const m = /\/cover\/([0-9a-zA-Z]+)\.(?:jpe?g|png|webp|gif)/i.exec(String(url || ''));
     return m ? m[1].toLowerCase() : '';
   }
 
@@ -13404,16 +14199,17 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const cr = card.getBoundingClientRect();
       if (!cr.width || !cr.height) return null;
       const minArea = cr.width * cr.height * 0.22;
-      const kids = card.querySelectorAll ? card.querySelectorAll('div,a,span,img,picture') : [];
+      const kids = card.querySelectorAll ? card.querySelectorAll('div,a,span,img,picture,canvas') : [];
       let best = null;
       let bestArea = 0;
-      for (let i = 0; i < kids.length && i < 28; i++) {
+      for (let i = 0; i < kids.length && i < 32; i++) {
         const el = kids[i];
         if (!el || (el.classList && el.classList.contains('tgtk-pinpill'))) continue;
         const isImg = el.tagName === 'IMG';
+        const isCv = el.tagName === 'CANVAS';
         const st = el.style && el.style.backgroundImage;
         const cls = String((el && el.className) || '');
-        const hinted = (st && st !== 'none') || isImg || /(^|\s)(cover|poster|art|thumb)/i.test(cls);
+        const hinted = (st && st !== 'none') || isImg || isCv || /(^|\s)(cover|poster|art|thumb)/i.test(cls);
         if (!hinted) continue;
         const r = el.getBoundingClientRect();
         const area = r.width * r.height;
@@ -13422,7 +14218,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           best = el;
         }
       }
-      if (best) return best.tagName === 'IMG' ? best.parentElement || best : best;
+      if (best) {
+        return (best.tagName === 'IMG' || best.tagName === 'CANVAS')
+          ? best.parentElement || best : best;
+      }
       const boxes = card.querySelectorAll ? card.querySelectorAll('div') : [];
       for (let i = 0; i < boxes.length && i < 14; i++) {
         const el = boxes[i];
@@ -13446,6 +14245,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       return r;
     } catch (e) {}
     return null;
+  }
+
+  function pinCanvasIn(box) {
+    try {
+      if (!box || !box.querySelector) return null;
+      const cv = box.querySelector('canvas');
+      return (cv && cv.width && cv.height) ? cv : null;
+    } catch (e) { return null; }
   }
 
   function pinPillFor(card, cid) {
@@ -13503,10 +14310,26 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
     try {
       if (box) {
-        pill.style.left = '4px';
-        pill.style.marginLeft = '0';
-        pill.style.top = 'auto';
-        pill.style.bottom = '4px';
+        const cv = pinCanvasIn(box);
+        if (cv) {
+          const br = box.getBoundingClientRect();
+          const r = cv.getBoundingClientRect();
+          const db = Math.max(0, Math.round(br.bottom - r.bottom));
+          const dr = Math.max(0, Math.round(br.right - r.right));
+          pill.style.top = 'auto';
+          pill.style.bottom = (db + 4) + 'px';
+          pill.style.left = 'auto';
+          pill.style.right = (dr + 4) + 'px';
+          pill.style.marginLeft = '0';
+          pill.style.marginRight = '0';
+        } else {
+          pill.style.top = 'auto';
+          pill.style.bottom = '4px';
+          pill.style.left = '4px';
+          pill.style.right = 'auto';
+          pill.style.marginLeft = '0';
+          pill.style.marginRight = '0';
+        }
       } else {
         const nb = pinNameBox(card);
         let top = 0;
@@ -13516,12 +14339,16 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         }
         if (nb && top > 2) {
           pill.style.left = '4px';
+          pill.style.right = 'auto';
           pill.style.marginLeft = '0';
+          pill.style.marginRight = '0';
           pill.style.top = top + 'px';
           pill.style.bottom = 'auto';
         } else {
           pill.style.left = '4px';
+          pill.style.right = 'auto';
           pill.style.marginLeft = '0';
+          pill.style.marginRight = '0';
           pill.style.top = 'auto';
           pill.style.bottom = '30px';
         }
@@ -14445,53 +15272,43 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     ta.remove();
   }
 
+  function idListText(ids) {
+    const out = [];
+    const seen = new Set();
+    (ids || []).forEach((v) => {
+      const s = String(v == null ? '' : v).trim();
+      if (!/^\d+$/.test(s) || seen.has(s)) return;
+      seen.add(s);
+      out.push(s);
+    });
+    return out;
+  }
+
   function copyTemple() {
     const rows = templeRows();
     if (!rows.length) return setTempleStatus('没有可复制的结果');
-    const lines = ['角色\t塔主\t塔等级\t当前固定资产\t上限\t塔图'];
-    rows.forEach((t) => {
-      lines.push(
-        [
-          t.CharacterName || charaName(t.CharacterId),
-          t.Nickname || t.Name || '',
-          t.Level ?? 0,
-          num(t.Assets),
-          num(t.Sacrifices),
-          coverInfo(t).isDefault ? '默认' : '已换',
-        ].join('\t')
-      );
-    });
-    copyText(lines.join('\n'), (m) => setTempleStatus(`${m} ${rows.length} 行`));
+    const ids = idListText(rows.map((t) => t.CharacterId));
+    copyText(ids.join(' '), (m) => setTempleStatus(`${m} ${fmt(ids.length)} 个角色 ID`));
   }
 
   function copyHolding() {
     const rows = holdRows();
     if (!rows.length) return setHoldStatus('没有可复制的结果');
-    const lines = ['角色\t等级\t持股\t现价\t市值'];
-    rows.forEach((x) => {
-      lines.push([x.Name || charaName(x.CharacterId), x.Level ?? 0, num(x.UserAmount), num(x.Current), num(x.UserAmount) * num(x.Current)].join('\t'));
-    });
-    copyText(lines.join('\n'), (m) => setHoldStatus(`${m} ${rows.length} 行`));
+    const ids = idListText(rows.map((x) => x.CharacterId));
+    copyText(ids.join(' '), (m) => setHoldStatus(`${m} ${fmt(ids.length)} 个角色 ID`));
   }
 
   function copyFavs() {
-    const rows = favRowsSorted();
-    if (!rows.length) return setFavStatus('没有可复制的结果');
-    const lines = ['角色\t等级\t持股\t固定资产\t固定资产上限\t英灵殿\t现价'];
-    rows.forEach((r) => {
-      lines.push(
-        [
-          r.name || charaName(r.id),
-          r.level,
-          r.mine === null ? '' : r.mine,
-          r.fixed === null ? '' : r.fixed,
-          r.fixedMax === null ? '' : r.fixedMax,
-          r.valhalla === null ? '' : r.valhalla,
-          r.current,
-        ].join('\t')
-      );
-    });
-    copyText(lines.join('\n'), (m) => setFavStatus(`${m} ${rows.length} 行`));
+    const fid = S.favFolder || 'all';
+    const tree = fid === 'all' ? null : folderTree(fid);
+    const ids = idListText(
+      (favs || [])
+        .filter((f) => !tree || tree.includes(f.folder))
+        .map((f) => f.id)
+    );
+    if (!ids.length) return setFavStatus('当前收藏夹里没有可复制的角色');
+    const where = fid === 'all' ? '全部收藏夹' : '当前收藏夹';
+    copyText(ids.join(' '), (m) => setFavStatus(`${m} ${fmt(ids.length)} 个角色 ID（${where}）`));
   }
 
   const CSS = `
@@ -14773,6 +15590,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-sdpick-x:hover{background:var(--tg-badbg);color:var(--tg-bad)}
 .tgtk-sdpick-clear{border:0;background:transparent;color:var(--tg-link);font-size:10px;cursor:pointer;padding:1px 3px}
 .tgtk-sdpick-clear:hover{text-decoration:underline}
+.tgtk-picktxt.tgtk-sdtline{color:var(--tg-fg);font-variant-numeric:tabular-nums}
+.tgtk-sdsort{min-width:52px;justify-content:center}
+.tgtk-sdest{flex:none;color:var(--tg-accent-fg);font-size:11px;font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px}
 .tgtk-lv{display:flex;align-items:center;gap:6px;margin-top:3px}
 .tgtk-lvbar{flex:1;height:3px;background:var(--tg-bar);border-radius:2px;overflow:hidden;min-width:30px}
 .tgtk-lvbar i{display:block;height:100%;background:var(--tg-accent);border-radius:2px}
@@ -15098,7 +15919,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.21（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.34（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
