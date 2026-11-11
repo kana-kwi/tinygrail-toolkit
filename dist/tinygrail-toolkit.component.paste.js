@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.34
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.39
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -8960,6 +8960,39 @@ html[data-theme="dark"] .tgtk-crop-tip{color:#727b8d}
   background:#f8f3f6;color:#332b31;font:12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
 html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-color:#4a5162}
 .tgtk-crop-ft{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:4px}
+.tgtk-crop-ft .tgtk-crop-gifbtn{margin-right:auto}   /* 「清除封面」靠最左，取消/确定仍在右 */
+.tgtk-crop-tabrow{display:flex;align-items:center;gap:8px;margin:14px 0 10px}
+.tgtk-crop-tabrow .tgtk-crop-tabs{margin:0}
+.tgtk-crop-tabrow .tgtk-crop-chk{margin:0;min-width:0}
+.tgtk-crop-gifrow{display:flex;align-items:center;gap:6px;height:28px;margin:-2px 0 8px}
+.tgtk-crop-tip:empty{display:none}
+.tgtk-crop-info{display:flex;flex-direction:column;justify-content:flex-start;gap:2px;margin:8px 0 6px}
+.tgtk-crop-info.tgtk-info-fixed{height:37px;overflow:hidden}
+.tgtk-crop-info .tgtk-crop-tip{margin:0;min-height:0;line-height:17px}
+.tgtk-crop-slot{display:flex;flex-direction:column;justify-content:center;height:37px;flex:none}
+.tgtk-crop-slot .tgtk-crop-row{margin-bottom:0}
+.tgtk-crop-slot .tgtk-crop-chk{margin:0}
+.tgtk-crop-gap{flex:none}
+.tgtk-crop-openlink{color:#d4568e;text-decoration:underline;cursor:pointer}
+#tgtk-crop [hidden]{display:none!important}
+.tgtk-crop-qwrap{display:flex;align-items:center;gap:8px}
+.tgtk-crop-gifbtn{box-sizing:border-box;height:24px;padding:0 10px;border:1px solid rgba(212,86,142,.45);
+  border-radius:6px;background:transparent;color:#b07a92;cursor:pointer;
+  font:600 12px/22px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+.tgtk-crop-gifbtn.on{background:#d4568e;border-color:#d4568e;color:#fff}
+html[data-theme="dark"] .tgtk-crop-gifbtn{color:#ffb3cf;border-color:rgba(255,179,207,.45)}
+html[data-theme="dark"] .tgtk-crop-gifbtn.on{background:#d4568e;border-color:#d4568e;color:#fff}
+.tgtk-crop-step{box-sizing:border-box;width:24px;height:24px;padding:0;flex:none;
+  border:1px solid rgba(212,86,142,.45);border-radius:5px;background:transparent;color:#b07a92;
+  cursor:pointer;font:11px/22px -apple-system,"PingFang SC",sans-serif}
+.tgtk-crop-step:disabled,.tgtk-crop-playbtn:disabled{opacity:.4;cursor:default}
+.tgtk-crop-fno{font-size:12px;opacity:.8;min-width:86px;text-align:center}
+.tgtk-crop-playbtn{box-sizing:border-box;height:24px;padding:0 10px;flex:none;
+  border:1px solid rgba(212,86,142,.45);border-radius:6px;background:transparent;color:#b07a92;
+  cursor:pointer;font:600 12px/22px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+.tgtk-crop-hint{color:#9b8d97;font-size:11px;line-height:1.3}
+html[data-theme="dark"] .tgtk-crop-hint{color:#727b8d}
+.tgtk-crop-sp{flex:1}
 .tgtk-ttoast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%) translateY(8px);
   z-index:2147483647;padding:8px 16px;border-radius:999px;background:#d4568e;color:#fff;
   font:600 13px/1.4 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -12510,6 +12543,340 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return ossUrl;
   }
 
+  const TGGC_LS = 'tgtk:gifcovers:v1';
+  const TGGC_MAX = 10 * 1024 * 1024;   // 站点对塔图 GIF 的上限
+  const TGGC_STORE = 720;              // 解码后单帧最大宽度（预览 / 编码都够用）
+  const TGGC_CACHE = 12;               // 内存里最多缓存几帧
+  const TGGC = {
+    dec: null, count: 0, w: 0, h: 0, cache: new Map(),
+    binds: {}, warmed: {}, obs: [], docs: [], mos: [], started: false,
+  };
+
+  function gcKb(n) {
+    n = num(n);
+    if (n < 1024) return n + ' B';
+    return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(0) + ' KB';
+  }
+  function gcSupported() {
+    try { return typeof HWIN.ImageDecoder === 'function'; } catch (e) { return false; }
+  }
+
+  function gcClose() {
+    TGGC.cache.forEach((f) => { try { f.bmp.close(); } catch (e) {} });
+    TGGC.cache.clear();
+    if (TGGC.dec) { try { TGGC.dec.close(); } catch (e) {} }
+    TGGC.dec = null; TGGC.count = 0; TGGC.w = 0; TGGC.h = 0;
+  }
+
+  async function gcFrame(i) {
+    if (!TGGC.dec) throw new Error('还没有载入 GIF');
+    const hit = TGGC.cache.get(i);
+    if (hit) { TGGC.cache.delete(i); TGGC.cache.set(i, hit); return hit; }
+    const res = await TGGC.dec.decode({ frameIndex: i });
+    const iw = res.image.displayWidth, ih = res.image.displayHeight;
+    const dur = res.image.duration || 0;            // 微秒
+    let bmp = await HWIN.createImageBitmap(res.image);
+    try { res.image.close(); } catch (e) {}
+    let w = iw, h = ih;
+    if (iw > TGGC_STORE) {
+      const k = TGGC_STORE / iw;
+      w = Math.max(1, Math.round(iw * k));
+      h = Math.max(1, Math.round(ih * k));
+      const cv = HDOC.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+      try { bmp.close(); } catch (e) {}
+      bmp = await HWIN.createImageBitmap(cv);
+    }
+    const fr = { bmp, w, h, delayMs: Math.max(2, Math.round(dur / 1000)) };
+    TGGC.cache.set(i, fr);
+    while (TGGC.cache.size > TGGC_CACHE) {
+      const k = TGGC.cache.keys().next().value;
+      const old = TGGC.cache.get(k);
+      TGGC.cache.delete(k);
+      try { old.bmp.close(); } catch (e) {}
+    }
+    return fr;
+  }
+
+  async function gcOpen(bytes) {
+    if (!gcSupported()) throw new Error('这个浏览器不支持逐帧解码（需要 Chromium 内核）');
+    const d = new HWIN.ImageDecoder({ data: bytes, type: 'image/gif' });
+    await d.tracks.ready;
+    const track = d.tracks.selectedTrack;
+    const count = (track && track.frameCount) || 0;
+    if (!count) { try { d.close(); } catch (e) {} throw new Error('这张 GIF 读不到帧'); }
+    gcClose();
+    TGGC.dec = d; TGGC.count = count;
+    const first = await gcFrame(0);
+    TGGC.w = first.w; TGGC.h = first.h;
+    return { count, w: TGGC.w, h: TGGC.h };
+  }
+
+  function gcCropCanvas(frame, fit, box, ratio, outW) {
+    const iw = frame.w, ih = frame.h;
+    const nx = (box.x - fit.x) / fit.w;
+    const ny = (box.y - fit.y) / fit.h;
+    const nw = box.w / fit.w;
+    const nh = box.h / fit.h;
+    const sx = Math.max(0, Math.min(nx, 1)) * iw;
+    const sy = Math.max(0, Math.min(ny, 1)) * ih;
+    const sw = Math.max(2, Math.min(nw * iw, iw - sx));
+    const sh = Math.max(2, Math.min(nh * ih, ih - sy));
+    const w = Math.max(2, Math.round(Math.min(outW || sw, sw)));
+    const h = Math.max(2, Math.round(w / ratio));
+    const cv = HDOC.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const g = cv.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(frame.bmp, sx, sy, sw, sh, 0, 0, w, h);
+    return cv;
+  }
+  function gcToUrl(cv) {
+    let url = cv.toDataURL('image/webp', 0.95);
+    if (url.indexOf('data:image/webp') !== 0) url = cv.toDataURL('image/png');
+    return url;
+  }
+  function gcCoverUrl(frame, fit, box, outW) {
+    return gcToUrl(gcCropCanvas(frame, fit, box, 0.75, outW || 520));
+  }
+  function gcLinkPair(frame, fit, box) {
+    const cv = gcCropCanvas(frame, fit, box, 432 / 320, 720);
+    const half = Math.max(2, Math.round(cv.width * 9 / 16));
+    const cut = (sx) => {
+      const o = HDOC.createElement('canvas');
+      o.width = half; o.height = cv.height;
+      o.getContext('2d').drawImage(cv, sx, 0, half, cv.height, 0, 0, half, cv.height);
+      return gcToUrl(o);
+    };
+    return [cut(0), cut(Math.max(0, cv.width - half))];
+  }
+
+  function gcMyUid() {
+    if (TGT.me && TGT.me.id) return String(TGT.me.id);
+    try {
+      const o = JSON.parse(HWIN.localStorage.getItem('tinygrail:user-assets') || '0');
+      if (o && o.id) return String(o.id);
+    } catch (e) {}
+    return '';
+  }
+  function gcDocStyle(d) {
+    try {
+      if (!d || d.getElementById('tgtk-gifov-style')) return;
+      const st = d.createElement('style');
+      st.id = 'tgtk-gifov-style';
+      st.textContent = '.tgtk-gifov{position:absolute;inset:0;z-index:1;pointer-events:none}' +
+        '.tgtk-gifov img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}';
+      (d.head || d.documentElement).appendChild(st);
+    } catch (e) {}
+  }
+  const GC_SEL = '#tg-temple, #tg-temple-link-left, #tg-temple-link-right';
+  function gcHostKey(host) {
+    const ds = host && host.dataset;
+    if (!ds || ds.characterId === undefined || ds.userId === undefined) return '';
+    return String(ds.characterId) + ':' + String(ds.userId);
+  }
+  function gcCoverBox(host) {
+    const cv = host.querySelector('canvas');
+    if (cv && cv.parentElement) return cv.parentElement;
+    const imgs = host.querySelectorAll('img');
+    for (let i = 0; i < imgs.length; i++) {
+      if (imgs[i].closest && imgs[i].closest('.tgtk-gifov')) continue;
+      if (imgs[i].parentElement) return imgs[i].parentElement;
+    }
+    const divs = host.querySelectorAll('div');
+    for (let i = 0; i < divs.length; i++) {
+      const cls = divs[i].className || '';
+      if (typeof cls === 'string' && /\babsolute\b/.test(cls) && /\binset-0\b/.test(cls) &&
+        /\boverflow-hidden\b/.test(cls)) return divs[i];
+    }
+    return null;
+  }
+  function gcPlaying(box) {
+    if (box.querySelector('canvas')) return false;
+    const imgs = box.querySelectorAll('img');
+    for (let i = 0; i < imgs.length; i++) {
+      if (!imgs[i].closest || !imgs[i].closest('.tgtk-gifov')) return true;
+    }
+    return false;
+  }
+  function gcLinkBoxes(box) {
+    const wrap = box.closest ? box.closest('#tg-temple-link') : null;
+    if (!wrap) return null;
+    const out = [];
+    ['#tg-temple-link-left', '#tg-temple-link-right'].forEach((sel) => {
+      const host = wrap.querySelector(sel);
+      const b = host && gcCoverBox(host);
+      if (b && out.indexOf(b) < 0) out.push(b);
+    });
+    return out.length ? out : null;
+  }
+  function gcShow(box, on) {
+    const ov = box && box.querySelector('.tgtk-gifov');
+    if (ov) ov.style.display = on ? 'block' : 'none';
+  }
+  function gcSync(box) {
+    if (!box) return;
+    const playing = gcPlaying(box);
+    const group = gcLinkBoxes(box);
+    if (group) { group.forEach((b) => gcShow(b, !playing)); return; }
+    gcShow(box, !playing);
+  }
+  function gcWarm(url) {
+    if (!url || TGGC.warmed[url]) return;
+    try {
+      const im = new HWIN.Image();
+      im.src = url;
+      if (im.decode) im.decode().then(() => { TGGC.warmed[url] = im; }, () => {});
+      else TGGC.warmed[url] = im;
+    } catch (e) {}
+  }
+  function gcMount(box, url) {
+    if (!box) return;
+    gcWarm(url);
+    const d = box.ownerDocument || HDOC;
+    gcDocStyle(d);
+    let ov = box.querySelector('.tgtk-gifov');
+    if (!ov) {
+      ov = d.createElement('div');
+      ov.className = 'tgtk-gifov';
+      const im = d.createElement('img');
+      im.alt = '';
+      im.decoding = 'sync';
+      ov.appendChild(im);
+      const btn = box.querySelector('button');
+      if (btn) box.insertBefore(ov, btn); else box.appendChild(ov);
+    }
+    const img = ov.querySelector('img');
+    if (url && img.__tgtkU !== url) { img.src = url; img.__tgtkU = url; }
+    if (!ov.__tgtkMo) {
+      const mo = new MutationObserver(() => gcSync(box));
+      mo.observe(box, { childList: true });
+      ov.__tgtkMo = mo;
+      TGGC.obs.push({ box, mo });
+    }
+    gcSync(box);
+  }
+  function gcApplyAll() {
+    if (!Object.keys(TGGC.binds).length) return;
+    for (const d of allDocs()) {
+      let hosts;
+      try { hosts = d.querySelectorAll(GC_SEL); } catch (e) { continue; }
+      for (let i = 0; i < hosts.length; i++) {
+        const host = hosts[i];
+        const key = gcHostKey(host);
+        if (!key) continue;
+        const url = TGGC.binds[key] || TGGC.binds[key.split(':')[0] + ':*'];
+        if (!url) continue;
+        const box = gcCoverBox(host);
+        if (box) gcMount(box, url);
+      }
+    }
+    TGGC.obs = TGGC.obs.filter((o) => {
+      if (o.box && o.box.isConnected) return true;
+      try { o.mo.disconnect(); } catch (e) {}
+      return false;
+    });
+  }
+  function gcTempleish(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (/^tg-temple/.test(node.id || '')) return true;
+    return !!(node.querySelector && node.querySelector(GC_SEL));
+  }
+  function gcDocMutation(muts) {
+    if (!Object.keys(TGGC.binds).length) return;
+    let hit = false;
+    for (let i = 0; i < muts.length && !hit; i++) {
+      const m = muts[i];
+      if (m.type !== 'childList') continue;
+      const add = m.addedNodes, rem = m.removedNodes;
+      for (let j = 0; j < add.length && !hit; j++) if (gcTempleish(add[j])) hit = true;
+      for (let j = 0; j < rem.length && !hit; j++) {
+        const n = rem[j];
+        if (n.nodeType !== 1) continue;
+        if (gcTempleish(n)) { hit = true; break; }
+        if (n.classList && n.classList.contains('tgtk-gifov')) { hit = true; break; }
+        if (n.querySelector && n.querySelector('.tgtk-gifov')) { hit = true; break; }
+      }
+    }
+    if (hit) gcApplyAll();
+  }
+  function gcWatch() {
+    if (TGGC.started) return;
+    TGGC.started = true;
+    const attach = () => {
+      for (const d of allDocs()) {
+        if (!d || !d.documentElement || TGGC.docs.indexOf(d) >= 0) continue;
+        TGGC.docs.push(d);
+        try {
+          const mo = new MutationObserver(gcDocMutation);
+          mo.observe(d.documentElement, { childList: true, subtree: true });
+          TGGC.mos.push(mo);
+        } catch (e) {}
+      }
+    };
+    attach();
+    setInterval(() => {
+      try { if (HWIN.__TGTK_HOST__ !== HOST_TOKEN) return; } catch (e) {}
+      attach();
+      gcApplyAll();
+    }, 1500);
+  }
+  function gcSaveBinds() {
+    try {
+      if (!Object.keys(TGGC.binds).length) HWIN.localStorage.removeItem(TGGC_LS);
+      else HWIN.localStorage.setItem(TGGC_LS, JSON.stringify(TGGC.binds));
+      return true;
+    } catch (e) {
+      tgToast('封面存不下了（本地存储满了），这次只在当前页面生效');
+      return false;
+    }
+  }
+  function gcLoadBinds() {
+    let n = 0;
+    try {
+      const o = JSON.parse(HWIN.localStorage.getItem(TGGC_LS) || 'null');
+      if (o && typeof o === 'object') {
+        Object.keys(o).forEach((k) => {
+          if (typeof o[k] === 'string' && /^data:image\//.test(o[k])) { TGGC.binds[k] = o[k]; n++; }
+        });
+      }
+    } catch (e) {}
+    return n;
+  }
+  function gcBind(cid, uid, url) {
+    if (!cid || !url) return '';
+    const key = String(cid) + ':' + String(uid || gcMyUid() || '*');
+    TGGC.binds[key] = url;
+    gcWarm(url);
+    gcSaveBinds();
+    gcApplyAll();
+    return key;
+  }
+  function gcClear() {
+    TGGC.binds = {};
+    TGGC.obs.forEach((o) => { try { o.mo.disconnect(); } catch (e) {} });
+    TGGC.obs = [];
+    for (const d of allDocs()) {
+      try {
+        const list = d.querySelectorAll('.tgtk-gifov');
+        for (let i = 0; i < list.length; i++) list[i].remove();
+      } catch (e) {}
+    }
+    gcSaveBinds();
+  }
+  function gcCoverCount() { return Object.keys(TGGC.binds).length; }
+
+  function startGifCovers() {
+    const n = gcLoadBinds();
+    gcWatch();
+    if (n) {
+      gcApplyAll();
+      setTimeout(gcApplyAll, 400);
+      setTimeout(gcApplyAll, 1200);
+    }
+  }
+
   function tgH(doc, tag, attrs, ...kids) {
     const d = doc || HDOC;
     const el = d.createElement(tag);
@@ -12531,6 +12898,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   }
 
   function tgCropClose() {
+    try { if (TGT.gifStop) { const f = TGT.gifStop; TGT.gifStop = null; f(); } } catch (e) {}
     for (const d of allDocs()) {
       const p = d.getElementById && d.getElementById('tgtk-crop');
       if (!p) continue;
@@ -12555,6 +12923,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       img: null, fit: null, box: null, drag: null,
       outMime: 'image/jpeg', rawDataUrl: '', rawMime: '', rawFile: null,
       animated: false, rawUrl: '',
+      gifBytes: null,
+      autoGifUrl: '',
       srcUrl: '', srcRaw: '',
       touched: false,
       urlOnly: false,
@@ -12563,6 +12933,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const st = SIDES.self;
     const RATIO = link ? 432 / 320 : 0.75; // 宽 / 高
     let curHalf = 'left';            // 本塔用左半还是右半
+
+    let gifMode = false;             // 是否在逐帧选封面
+    let gifIdx = 0;                  // 当前选中的帧
+    let gifPlaying = false;
+    let gifTimer = 0;
+    let gifTok = 0;                  // 取帧竞态保护
+    let gifOnly = false;             // 只更换封面：只贴图，不重新生成 GIF
+    let gifBusy = false;
+    let fitGap = null;               // LINK：用留白把浮窗总高锁在开窗那一刻（盒子建好后赋值）
 
     const normCover = (u) => {
       const raw = String(u || '');
@@ -12590,10 +12969,34 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       tgH(cropDoc, 'option', { value: 'full' }, '原图画质（推荐）'),
       tgH(cropDoc, 'option', { value: '480' }, '标准 480×640')
     );
+    const gifPrev = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-step', 'data-tgtk': '1', title: '上一帧' }, '◀');
+    const gifNext = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-step', 'data-tgtk': '1', title: '下一帧' }, '▶');
+    const gifNo = tgH(cropDoc, 'span', { class: 'tgtk-crop-fno' }, '—');
+    const gifPlayBtn = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-playbtn', 'data-tgtk': '1' }, '播放预览');
+    gifPlayBtn.disabled = true;      // 没载入 GIF 时按不动，但位置留着
+    const gifBtn = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-gifbtn', 'data-tgtk': '1' }, 'GIF封面');
+    const gifClear = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-gifbtn', 'data-tgtk': '1', title: '删掉本塔已贴的 GIF 封面' }, '清除封面');
+    gifClear.hidden = true;
+    const gifSp = tgH(cropDoc, 'span', { class: 'tgtk-crop-sp' });    // 宽度是量出来的，见 alignGifBar
+    const gifSp2 = tgH(cropDoc, 'span', { class: 'tgtk-crop-sp' });   // 把「GIF封面」顶到滑杆右端
+    const qWrap = tgH(cropDoc, 'span', { class: 'tgtk-crop-qwrap' },
+      tgH(cropDoc, 'label', null, '输出画质'), qSel);
+    const gifBar = tgH(cropDoc, 'div', { class: 'tgtk-crop-gifrow' },
+      qWrap, gifPrev, gifNo, gifNext, gifSp, gifPlayBtn, gifSp2, gifBtn);
+    const gifInfo = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, '还没有载入 GIF');
+    gifInfo.hidden = true;
+    const gifOpen = tgH(cropDoc, 'a', { class: 'tgtk-crop-openlink', href: '#', target: '_blank',
+      rel: 'noopener noreferrer', title: '在新标签打开本塔的 GIF，另存后拖进上面的黑色区域' }, '本塔GIF可另存后拖入');
+    const gifOpenRow = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip', hidden: '' }, gifOpen);
+    const gifOnlyChk = tgH(cropDoc, 'input', { type: 'checkbox', 'data-tgtk': '1' });
+    const gifOnlyRow = tgH(cropDoc, 'label', { class: 'tgtk-crop-chk', hidden: '' }, gifOnlyChk,
+      tgH(cropDoc, 'span', null, '只更换封面（只在本机贴图，不改站点上的 GIF）'));
     const stage = tgH(cropDoc, 'div', { class: 'tgtk-crop-stage' }, cvs,
       tgH(cropDoc, 'div', { class: 'tgtk-crop-drop' }, '松开即可载入这张图片'));
-    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' },
-      '把图片拖进上面的黑色区域，或点「选择文件」；也可直接 Ctrl+V 粘贴截图');
+    const TIP_DEFAULT = '把图片拖进上面的黑色区域，或点「选择文件」；也可直接 Ctrl+V 粘贴截图';
+    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, TIP_DEFAULT);
+    const infoBox = tgH(cropDoc, 'div', { class: 'tgtk-crop-info' + (link ? '' : ' tgtk-info-fixed') },
+      tip, gifInfo, gifOpenRow);
 
     const outSize = (s) => {
       s = s || st;
@@ -12630,6 +13033,23 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       (s || st).outMime === 'image/webp' ? 'WebP' :
       (s || st).outMime === 'image/gif' ? 'GIF 动图（走小圣杯上传）' : 'JPEG 质量 100';
     const refreshTip = () => {
+      if (link) { tip.textContent = ''; return; }   // LINK 不要说明行（用户要求），信息都在按键和帧信息里
+      if (gifMode) {
+        if (!TGGC.count) {
+          tip.textContent = link ? ''
+            : (st.autoGifUrl ? '本塔封面就是 GIF：点下面链接另存后拖进来'
+              : '还没有载入 GIF：把 .gif 拖进上面的黑色区域，或点左边「选择文件」');
+          return;
+        }
+        const how = link
+          ? '切成两张 3:4，' + (chk.checked && partnerMine
+            ? '另一半给 ' + (link.linkName || 'LINK 圣殿') : '只贴本塔')
+          : (gifOnly
+            ? '只在本机贴图'
+            : '贴封面 + 原 GIF 直交');
+        tip.textContent = '第 ' + (gifIdx + 1) + ' / ' + TGGC.count + ' 帧 · ' + how;
+        return;
+      }
       if (st.animated) {
         tip.textContent = 'GIF 动图无法裁剪，将交给小圣杯自己的上传通道（保留动画）' +
           (st.rawUrl ? ' · 按原地址提交' : ' · 原文件直交') +
@@ -12642,12 +13062,210 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         return;
       }
       const o = outSize();
-      if (!o) return;
+      if (!o) { tip.textContent = TIP_DEFAULT; return; }   // 没图也要留说明，别让这一行空掉
       const which = curHalf === 'right' ? '右半' : '左半';
       tip.textContent = (link ? '两张各 ' + o.w + '×' + o.h + '（' + which + '给本塔，重叠约 12.5%），' : '') +
         '拖动裁剪框移动，拉右下角或滑杆缩放；输出 ' + o.w + '×' + o.h + ' · ' +
         mimeOf() + (o.raw ? ' · 原文件直传' : '') +
         (link ? (chk.checked && partnerMine ? ' · 另一半给 ' + (link.linkName || 'LINK 圣殿') : ' · 只换本塔') : '');
+    };
+
+    const gifBytesOf = async (side) => {
+      if (side.gifBytes) return side.gifBytes;
+      if (side.rawFile && side.rawFile.arrayBuffer) {
+        const buf = await side.rawFile.arrayBuffer();
+        side.gifBytes = new Uint8Array(buf);
+        return side.gifBytes;
+      }
+      if (side.rawUrl) {
+        const r = await fetch(side.rawUrl, { mode: 'cors' });
+        if (!r.ok) throw new Error('这个地址读不到 GIF（HTTP ' + r.status + '），换成本地文件');
+        const buf = await r.arrayBuffer();
+        side.gifBytes = new Uint8Array(buf);
+        return side.gifBytes;
+      }
+      return null;
+    };
+
+    const updateGifLabel = () => {
+      gifNo.textContent = TGGC.count ? ('第 ' + (gifIdx + 1) + ' / ' + TGGC.count + ' 帧') : '—';
+    };
+
+    const showGifFrame = async (i, keepBox) => {
+      const t = ++gifTok;
+      try {
+        const n = TGGC.count;
+        const k = ((i % n) + n) % n;
+        const fr = await gcFrame(k);
+        if (t !== gifTok || !gifMode) return;
+        gifIdx = k;
+        st.img = fr.bmp;
+        const W = cvs.width, H = cvs.height;
+        const sc = Math.min(W / fr.w, H / fr.h);
+        st.fit = { x: (W - fr.w * sc) / 2, y: (H - fr.h * sc) / 2, w: fr.w * sc, h: fr.h * sc };
+        if (!keepBox || !st.box) sizeBox(Number(range.value || 100) / 100);
+        else clampBox();
+        draw();
+        updateGifLabel();
+        refreshTip();
+      } catch (e) {
+        if (t === gifTok) gifInfo.textContent = '取帧失败：' + (e && e.message ? e.message : e);
+      }
+    };
+
+    const stopGifPlay = () => {
+      gifPlaying = false;
+      clearTimeout(gifTimer);
+      gifPlayBtn.textContent = '播放预览';
+    };
+
+    const startGifPlay = () => {
+      if (!gifMode || !TGGC.count) return;
+      gifPlaying = true;
+      gifPlayBtn.textContent = '暂停';
+      const tick = async () => {
+        if (!gifPlaying) return;
+        await showGifFrame(gifIdx + 1, true);
+        if (!gifPlaying) return;
+        const fr = TGGC.cache.get(gifIdx);
+        gifTimer = setTimeout(tick, fr ? fr.delayMs : 80);
+      };
+      tick();
+    };
+
+    const gifUI = () => {
+      gifPrev.hidden = gifNo.hidden = gifNext.hidden = gifPlayBtn.hidden = !gifMode;
+      gifInfo.hidden = !gifMode;
+      if (link) infoBox.hidden = !gifMode;      // LINK 平时不留说明行，选帧时才用这格放帧信息
+      gifOnlyRow.hidden = !gifMode || !!link;   // LINK 不支持 GIF 直传，只能贴图
+      gifPlayBtn.disabled = !TGGC.count;      // 没帧时留着位置，按不动
+      gifPrev.disabled = gifNext.disabled = !TGGC.count;
+      gifBtn.classList.toggle('on', gifMode);
+      const thisKey = target.cid ? (String(target.cid) + ':' + String(target.uid || gcMyUid() || '*')) : '';
+      gifClear.hidden = !(thisKey && TGGC.binds[thisKey]);
+      qWrap.hidden = gifMode;            // 输出画质对 GIF 没意义，藏掉（同一行换成步进键）
+      gifSp2.hidden = !gifMode;          // 非选帧时不撑开，让输出画质贴着 GIF封面
+      rowUrl.hidden = gifMode && !link;   // 单塔选帧时这格换成「只更换封面」；LINK 没有这一项，地址行留着不留空
+      setTimeout(() => { alignGifBar(); if (fitGap) fitGap(); }, 0);   // 等这一帧布局算完再量
+    };
+
+    const alignGifBar = () => {
+      if (!gifMode) { gifSp.style.flex = ''; gifSp.style.width = ''; return; }
+      try {
+        if (!gifBar.getBoundingClientRect().width) return;
+        const lr = labSize.getBoundingClientRect();
+        if (!lr.width) return;
+        const cur = gifSp.getBoundingClientRect().width || 0;
+        const dw = lr.left - gifPlayBtn.getBoundingClientRect().left;
+        if (Math.abs(dw) < 0.6) return;
+        gifSp.style.flex = '0 0 auto';
+        gifSp.style.width = Math.max(6, Math.round(cur + dw)) + 'px';
+      } catch (e) {}
+    };
+
+    const exitGif = (reload) => {
+      stopGifPlay();
+      gcClose();              // 退出就释放帧缓存，下次进来重新解
+      gifOpenRow.hidden = true;
+      gifMode = false;
+      updateGifLabel();
+      gifUI();
+      if (reload !== false && (st.rawDataUrl || st.rawUrl)) {
+        load(st.rawDataUrl || st.rawUrl, !st.rawDataUrl, st);
+      } else {
+        draw();
+        refreshTip();
+      }
+    };
+
+    const enterGif = async () => {
+      if (gifBusy) return;
+      if (!st.animated) {
+        stopGifPlay();
+        gcClose();
+        updateGifLabel();
+        gifUI();
+        gifInfo.hidden = true;
+        if (st.autoGifUrl) {
+          gifOpen.href = st.autoGifUrl;
+          gifOpenRow.hidden = false;
+          tip.textContent = '本塔封面就是 GIF：点下面的链接另存后拖进来';
+          return;
+        }
+        gifOpenRow.hidden = true;
+        refreshTip();
+        return;
+      }
+      gifBusy = true;
+      gifInfo.hidden = false;
+      gifInfo.textContent = '正在解析 GIF 帧…';
+      try {
+        if (!st.animated) gifInfo.textContent = '正在读取当前塔图的 GIF…';
+        const bytes = await gifBytesOf(st);
+        if (!bytes) throw new Error('读不到 GIF 字节，换成本地文件试试');
+        const info = await gcOpen(bytes);
+        gifMode = true;
+        gifOpenRow.hidden = true;
+        stopGifPlay();
+        gifUI();
+        await showGifFrame(gifIdx < info.count ? gifIdx : 0);
+        gifInfo.textContent = '原图 ' + info.w + '×' + info.h + ' · ' + gcKb(bytes.length) +
+          ' · 共 ' + info.count + ' 帧' +
+          (bytes.length > TGGC_MAX ? ' · 超10MB，只能贴封面' : '');
+      } catch (e) {
+        gifMode = false;
+        gifUI();
+        gifInfo.hidden = false;
+        gifInfo.textContent = '解析失败：' + (e && e.message ? e.message : e);
+        tgToast('GIF 解析失败：' + (e && e.message ? e.message : e));
+      } finally {
+        gifBusy = false;
+      }
+    };
+
+    gifBtn.addEventListener('click', () => {
+      if (gifMode) { exitGif(); return; }
+      gifMode = true;
+      gifUI();                  // 没有 GIF 时步进键是禁用的，提示会说明先载入
+      enterGif();
+    });
+    gifPrev.addEventListener('click', () => { stopGifPlay(); showGifFrame(gifIdx - 1); });
+    gifNext.addEventListener('click', () => { stopGifPlay(); showGifFrame(gifIdx + 1); });
+    gifPlayBtn.addEventListener('click', () => { if (gifPlaying) stopGifPlay(); else startGifPlay(); });
+    gifOnlyChk.addEventListener('change', () => { gifOnly = !!gifOnlyChk.checked; refreshTip(); });
+    gifClear.addEventListener('click', () => {
+      const keys = [];
+      if (target.cid) keys.push(String(target.cid) + ':' + String(target.uid || gcMyUid() || '*'));
+      if (link && link.linkCid) keys.push(String(link.linkCid) + ':' + String(link.linkUid || gcMyUid() || '*'));
+      let n = 0;
+      keys.forEach((k) => { if (TGGC.binds[k]) { delete TGGC.binds[k]; n++; } });
+      gcSaveBinds();
+      gcApplyAll();
+      gifUI();
+      tgToast(n ? '已清除本塔的 GIF 封面（刷新后也不会再出现）' : '本塔还没有贴过 GIF 封面');
+    });
+
+    const probeOwnGif = async () => {
+      try {
+        if (link) return;   // LINK 要的是整条拼图，读单塔会自动读成「只要一半」
+        if (!target || !target.cid || st.animated || st.autoGifUrl) return;
+        const cover = await tgTempleCover({
+          cid: target.cid,
+          uid: target.uid || gcMyUid() || '',
+          userName: (TGT.last && String(TGT.last.cid) === String(target.cid) &&
+            TGT.last.userName) || '',
+        });
+        if (st.animated || st.autoGifUrl) return;      // 期间用户自己选了图
+        if (!cover || !/\.gif(?:$|[?#])/i.test(cover)) return;
+        const url = tgCdnCover(cover) || cover;
+        if (!url) return;
+        st.autoGifUrl = url;
+        if (!gifMode) {
+          gifInfo.hidden = false;
+          gifInfo.textContent = '当前塔图是 GIF：点「GIF封面」可另存后拖入';
+          setTimeout(() => { if (!gifMode) gifInfo.hidden = true; }, 5000);
+        }
+      } catch (e) {}
     };
 
     const setHalf = (h) => {
@@ -12669,7 +13287,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       ctx.fillRect(0, 0, W, H);
       const f = st.fit;
       ctx.drawImage(st.img, f.x, f.y, f.w, f.h);
-      if (st.animated) return; // 动图不画裁剪框：框了也裁不出来
+      if (st.animated && !gifMode) return; // 纯动图不画裁剪框：框了也裁不出来
       const b = st.box;
       if (!b) return;
       ctx.fillStyle = 'rgba(0,0,0,.55)';
@@ -12749,7 +13367,13 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         dst.box = null;
         dst.touched = false; // 新图进来算「没动过裁剪框」
         if (dst !== st) { resolve(true); return; } // 已经切到另一侧：静默存下即可
-        range.disabled = !!st.animated || !!st.urlOnly;
+        range.disabled = (!!st.animated && !gifMode) || !!st.urlOnly;
+        if (gifMode) {
+          (cropDoc.defaultView || window).setTimeout(() => {
+            if (!gifMode) return;
+            if (st.animated) enterGif(); else exitGif(false);
+          }, 0);
+        }
         if (st.animated) { draw(); refreshTip(); resolve(true); return; }
         if (st.urlOnly) { draw(); refreshTip(); resolve(true); return; }
         sizeBox(Number(range.value || 100) / 100);
@@ -12823,6 +13447,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         dst.rawUrl = '';
         dst.srcUrl = '';
         dst.srcRaw = '';
+        dst.gifBytes = null;                  // 新文件：旧的字节作废
         dst.outMime = gif ? 'image/gif' : tgOutMime(f.type || dst.rawMime);
         load(raw, false, dst);
       };
@@ -12882,7 +13507,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       };
     };
     cvs.addEventListener('pointerdown', (e) => {
-      if (st.animated || st.urlOnly || !st.box) return;
+      if ((st.animated && !gifMode) || st.urlOnly || !st.box) return;
       const p = pos(e), b = st.box;
       const corner = Math.abs(p.x - (b.x + b.w)) < 16 && Math.abs(p.y - (b.y + b.h)) < 16;
       if (corner) st.drag = { mode: 'size', sx: p.x, w: b.w };
@@ -12953,9 +13578,37 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       return renderRegion(s, rx, Math.round(o.sy), rw, Math.round(o.sh), rw, Math.round(o.sh));
     };
 
+    const applyGif = async () => {
+      if (!TGGC.count) throw new Error('GIF 还没解析好，等它转完再点');
+      const fr = await gcFrame(gifIdx);
+      const uid = target.uid || gcMyUid();
+      if (link) {
+        const pair = gcLinkPair(fr, st.fit, st.box);
+        gcBind(target.cid, uid, pair[curHalf === 'right' ? 1 : 0]);
+        const wantOther = !!(chk.checked && partnerMine && link.linkCid);
+        if (wantOther) gcBind(link.linkCid, link.linkUid || '', pair[curHalf === 'right' ? 0 : 1]);
+        tgToast(wantOther ? '两座塔的封面都贴好了（只在本机生效）' : '本塔封面已贴好（只在本机生效）');
+        tgCropClose();
+        return false;
+      }
+      gcBind(target.cid, uid, gcCoverUrl(fr, st.fit, st.box, 520));
+      if (gifOnly || !st.animated) {
+        tgToast(gifOnly ? '封面已贴好（只在本机生效，站点上的 GIF 没动）'
+          : '封面已贴好（GIF 还是站点原来那张）');
+        tgCropClose();
+        return false;
+      }
+      stopGifPlay();
+      gifMode = false;
+      updateGifLabel();
+      gifUI();
+      return true;
+    };
+
     const ok = tgBtn('确定并更换', '按所选画质导出后上传', async () => {
       ok.disabled = true;
       try {
+        if (gifMode && !(await applyGif())) { ok.disabled = false; return; }
         try { await ensureUrl(); } catch (e) {}
         if (link) {
           if (!st.img) throw new Error('请先选择一张拼图');
@@ -13050,31 +13703,34 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const cancel = tgBtn('取消', '关闭', tgCropClose);
     cancel.classList.add('tgtk-tcancel');
 
+    const labSize = tgH(cropDoc, 'label', null, '裁剪大小');
+    const rowQ = tgH(cropDoc, 'div', { class: 'tgtk-crop-row' },
+      tgH(cropDoc, 'label', null, '本地图片'), file,
+      labSize, range
+    );
+    const rowUrl = tgH(cropDoc, 'div', { class: 'tgtk-crop-row' }, tgH(cropDoc, 'label', null, '图片地址'), urlIn);
+    const slot = tgH(cropDoc, 'div', { class: 'tgtk-crop-slot' }, rowUrl, gifOnlyRow);
+    const gap = tgH(cropDoc, 'div', { class: 'tgtk-crop-gap', hidden: '' });
+    const tabRow = link ? tgH(cropDoc, 'div', { class: 'tgtk-crop-tabrow' },
+      tabs, tgH(cropDoc, 'span', { class: 'tgtk-crop-sp' }), partnerMine ? chkRow : null) : null;
     const box = tgH(cropDoc, 'div', { class: 'tgtk-crop-box', 'data-tgtk': '1' },
       tgH(cropDoc, 'div', { class: 'tgtk-crop-hd' },
         tgH(cropDoc, 'span', null, (link ? '裁剪 LINK 塔图 · ' : '裁剪塔图 · ') + (target.label || '我的圣殿')),
         tgH(cropDoc, 'button', { class: 'tgtk-crop-x', type: 'button', 'data-tgtk': '1', title: '关闭' }, '×')
       ),
       stage,
-      link ? tabs : null,
-      partnerMine ? chkRow : null,
-      tip,
-      tgH(cropDoc, 'div', { class: 'tgtk-crop-row' },
-        tgH(cropDoc, 'label', null, '本地图片'), file,
-        tgH(cropDoc, 'label', null, '裁剪大小'), range,
-        tgH(cropDoc, 'label', null, '输出画质'), qSel
-      ),
-      tgH(cropDoc, 'div', { class: 'tgtk-crop-row' }, tgH(cropDoc, 'label', null, '图片地址'), urlIn),
-      tgH(cropDoc, 'div', { class: 'tgtk-crop-ft' }, cancel, ok)
+      tabRow,
+      infoBox,
+      rowQ,
+      gifBar,
+      gap,                       // LINK：说明删掉后把高度补在这里，「图片地址」和底部按钮不动
+      slot,                      // 图片地址 / 只更换封面（同一个格子）
+      tgH(cropDoc, 'div', { class: 'tgtk-crop-ft' }, gifClear, cancel, ok)
     );
+    gifUI();   // 默认收起：只留「GIF封面」按钮
+    probeOwnGif();                       // 当前塔图本身是 GIF 就自动接上
+
     const overlay = tgH(cropDoc, 'dialog', { id: 'tgtk-crop', class: 'tgtk-crop', 'data-tgtk': '1' }, box);
-    if (partnerMine) {
-      tip.textContent = '把整张拼图拖进上面的黑色区域，框选范围（与 LINK 卡同比例 27:20）；点「确定并更换」会切成两张等大的 3:4 ——' +
-        '本塔拿你选的那一半，勾选后另一半给 LINK 圣殿。';
-    } else if (link) {
-      tip.textContent = '把整张拼图拖进上面的黑色区域，框选范围（与 LINK 卡同比例 27:20）后取一半换本塔；' +
-        'LINK 另一半不是你的圣殿，不会去动它。';
-    }
     overlay.style.setProperty('position', 'fixed', 'important');
     overlay.style.setProperty('z-index', '2147483647', 'important');
     overlay.addEventListener('click', (e) => { if (e.target === overlay) tgCropClose(); });
@@ -13118,7 +13774,25 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     TGT.paste = { doc: cropDoc, fn: onPaste };
     cropDoc.addEventListener('paste', onPaste, true);
 
-    cropDoc.body.appendChild(overlay);
+    (cropDoc.body || cropDoc.documentElement).appendChild(overlay);
+    if (link) {
+      const VW = cropDoc.defaultView || window;
+      const GAP_MIN = 36;
+      let linkBaseH = 0;
+      fitGap = () => {
+        try {
+          const cur = box.getBoundingClientRect().height;
+          if (!cur) return;                        // 还没排版（dialog 没开）先不算
+          if (!linkBaseH) linkBaseH = cur + GAP_MIN;
+          gap.hidden = false;
+          gap.style.height = '0px';
+          const h = box.getBoundingClientRect().height;
+          gap.style.height = Math.max(0, Math.round(linkBaseH - h)) + 'px';
+        } catch (e) {}
+      };
+      VW.setTimeout(() => { fitGap(); tip.textContent = ''; fitGap(); }, 30);
+      VW.setTimeout(fitGap, 300);   // 字体晚到 / 首次布局晚一步时再兜一次
+    }
     try {
       if (typeof overlay.showModal === 'function') overlay.showModal();
       else overlay.setAttribute('open', '');
@@ -13127,6 +13801,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     }
     try { overlay.inert = false; overlay.removeAttribute('inert'); } catch (e) {}
     TGT.crop = { overlay, st, doc: cropDoc };
+    TGT.gifStop = () => { try { stopGifPlay(); } catch (e) {} try { gcClose(); } catch (e) {} };
     tgHidePopups();
     if (!ctx) tip.textContent = '当前环境无法绘制画布，请换个浏览器';
   }
@@ -15919,7 +16594,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.34（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.39（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -15941,6 +16616,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     mountDockSwitch();
     syncFabVisible();
     startStarBadge();
+    startGifCovers();
     startGrailExtras();
     startIcoTicker();
     HWIN.__TGTK_AUTOFILL_FN__ = clearFavAddAutofill;
@@ -15986,6 +16662,17 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       }
     } catch (e) {}
   }, 2000);
+
+  try {
+    const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
+    if (testing) {
+      HWIN.__TGTK_T__ = {
+        ver: '2.3.39', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
+        cropState: () => (TGT.crop && TGT.crop.st) || null,
+      };
+    }
+  } catch (e) {}
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);

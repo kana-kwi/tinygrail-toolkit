@@ -175,6 +175,21 @@
  *        本地选图或粘贴地址；默认「原图画质」按裁剪框的原图分辨率导出，PNG 走无损、
  *        JPEG 质量 1，3:4 原图拉满框时直接传原文件字节（一次重编码都不做），
  *        也可切「标准 480×640」省流量；签名用真实 MIME，URL 仍 .jpg（与站点一致）
+ *      + 裁剪浮层里的「GIF封面」：载入 .gif 后点它进入逐帧选封面，
+ *        「输出画质 / 图片地址」那两行换成 ◀ 第 N / M 帧 ▶ + 播放预览
+ *        （比例跟浮层走：单塔 3:4、LINK 432:320，不用再选）
+ *        · 勾「只更换封面」→ 只在本机贴覆盖层，站点上的 GIF 一个字节都不动
+ *        · 不勾 → 贴好覆盖层，GIF 本身仍按原来的方式直交（原文件 / 原地址整段交给站点，
+ *          不重编码、动画完整保留），全站生效
+ *        · 浮窗长度固定：说明行 + 帧信息行占同一个定高格子，「图片地址」与「只更换封面」
+ *          共用另一格，点「GIF封面」来回切都不会变高变矮；LINK 的说明行整行留空
+ *          （要删掉的那两行说明按用户要求不出现，多出来的高度由「图片地址」上方的留白吸收）
+ *        · 当前塔图本来就是 .gif 时不尝试读取（封面 CDN 不回 CORS 头、OSS 直连 403，
+ *          浏览器拿不到它的字节），只给一条「本塔GIF可另存后拖入」的链接：
+ *          点开新标签另存，再把 .gif 拖进黑色区域（LINK 模式不探测，那要整条拼图）
+ *        · LINK：站点不接受 GIF 直传，所以只贴图；勾「另一半」时两座塔都贴
+ *        覆盖层插在塔图 canvas 与站点播放键之间：静止显示你选的帧，点播放自动隐藏、
+ *        暂停恢复；每座塔各存一张（localStorage tgtk:gifcovers:v1），刷新、关弹窗都还在
  *      + 复制当前塔图到我的圣殿；修改按激进版接口 chara/temple/cover/{cid}/{uid}，
  *        新版没有数字 uid 时用 data-user-name 从 chara/temple/{cid} 反查
  *      + 新版自己的塔：图片裁剪键左边多一个「视频」图标键（圆润播放三角，与裁剪键同尺寸），
@@ -273,7 +288,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.34（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.39（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -10229,6 +10244,46 @@ html[data-theme="dark"] .tgtk-crop-tip{color:#727b8d}
   background:#f8f3f6;color:#332b31;font:12px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
 html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-color:#4a5162}
 .tgtk-crop-ft{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:4px}
+.tgtk-crop-ft .tgtk-crop-gifbtn{margin-right:auto}   /* 「清除封面」靠最左，取消/确定仍在右 */
+/* LINK：本塔用左半/右半 与「另一半给 LINK 圣殿」并成一行，后者靠右。
+   上下各让一点：贴着画布太挤（用户 2026-11-12 要求） */
+.tgtk-crop-tabrow{display:flex;align-items:center;gap:8px;margin:14px 0 10px}
+.tgtk-crop-tabrow .tgtk-crop-tabs{margin:0}
+.tgtk-crop-tabrow .tgtk-crop-chk{margin:0;min-width:0}
+/* GIF 选帧：GIF封面开关 / 逐帧步进 / 播放预览。定高 28：这行在「输出画质」和步进键之间来回换，
+   高度必须一致，否则点「GIF封面」浮窗会矮 4px */
+.tgtk-crop-gifrow{display:flex;align-items:center;gap:6px;height:28px;margin:-2px 0 8px}
+/* 说明行删掉后不占位；LINK 用 gap 把删掉的高度补在「图片地址」上方，浮窗总高不变 */
+.tgtk-crop-tip:empty{display:none}
+/* 「说明行 + GIF 信息行」固定占两行：点「GIF封面」时长出信息行也不改变浮窗长度 */
+.tgtk-crop-info{display:flex;flex-direction:column;justify-content:flex-start;gap:2px;margin:8px 0 6px}
+.tgtk-crop-info.tgtk-info-fixed{height:37px;overflow:hidden}
+.tgtk-crop-info .tgtk-crop-tip{margin:0;min-height:0;line-height:17px}
+/* 「图片地址」和「只更换封面」共用一格：两种模式来回切，浮窗高度不变 */
+.tgtk-crop-slot{display:flex;flex-direction:column;justify-content:center;height:37px;flex:none}
+.tgtk-crop-slot .tgtk-crop-row{margin-bottom:0}
+.tgtk-crop-slot .tgtk-crop-chk{margin:0}
+.tgtk-crop-gap{flex:none}
+.tgtk-crop-openlink{color:#d4568e;text-decoration:underline;cursor:pointer}
+#tgtk-crop [hidden]{display:none!important}
+.tgtk-crop-qwrap{display:flex;align-items:center;gap:8px}
+.tgtk-crop-gifbtn{box-sizing:border-box;height:24px;padding:0 10px;border:1px solid rgba(212,86,142,.45);
+  border-radius:6px;background:transparent;color:#b07a92;cursor:pointer;
+  font:600 12px/22px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+.tgtk-crop-gifbtn.on{background:#d4568e;border-color:#d4568e;color:#fff}
+html[data-theme="dark"] .tgtk-crop-gifbtn{color:#ffb3cf;border-color:rgba(255,179,207,.45)}
+html[data-theme="dark"] .tgtk-crop-gifbtn.on{background:#d4568e;border-color:#d4568e;color:#fff}
+.tgtk-crop-step{box-sizing:border-box;width:24px;height:24px;padding:0;flex:none;
+  border:1px solid rgba(212,86,142,.45);border-radius:5px;background:transparent;color:#b07a92;
+  cursor:pointer;font:11px/22px -apple-system,"PingFang SC",sans-serif}
+.tgtk-crop-step:disabled,.tgtk-crop-playbtn:disabled{opacity:.4;cursor:default}
+.tgtk-crop-fno{font-size:12px;opacity:.8;min-width:86px;text-align:center}
+.tgtk-crop-playbtn{box-sizing:border-box;height:24px;padding:0 10px;flex:none;
+  border:1px solid rgba(212,86,142,.45);border-radius:6px;background:transparent;color:#b07a92;
+  cursor:pointer;font:600 12px/22px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+.tgtk-crop-hint{color:#9b8d97;font-size:11px;line-height:1.3}
+html[data-theme="dark"] .tgtk-crop-hint{color:#727b8d}
+.tgtk-crop-sp{flex:1}
 .tgtk-ttoast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%) translateY(8px);
   z-index:2147483647;padding:8px 16px;border-radius:999px;background:#d4568e;color:#fff;
   font:600 13px/1.4 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -14223,6 +14278,373 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return ossUrl;
   }
 
+  /* ==================================================================
+   * GIF 选帧（塔图封面）
+   * ------------------------------------------------------------------
+   * 站点端只有一张 Cover，静止时显示的就是它的第一帧。所以「换封面」只有两条路：
+   *   · 覆盖层：把选中的那一帧盖在塔图上（只在本机生效，站点文件一个字节都不动；
+   *     点站点的播放键立刻换成原 GIF 播放，暂停又变回来）
+   *   · 换封面：GIF 本身按原来的方式直交（原文件 / 原地址，不重编码、动画完整保留），
+   *     同时把选中的帧贴成覆盖层，静止时先看到自己选的那一帧
+   * 这里放公用的两块：逐帧解码（ImageDecoder）、覆盖层贴图。
+   * ================================================================== */
+  const TGGC_LS = 'tgtk:gifcovers:v1';
+  const TGGC_MAX = 10 * 1024 * 1024;   // 站点对塔图 GIF 的上限
+  const TGGC_STORE = 720;              // 解码后单帧最大宽度（预览 / 编码都够用）
+  const TGGC_CACHE = 12;               // 内存里最多缓存几帧
+  const TGGC = {
+    dec: null, count: 0, w: 0, h: 0, cache: new Map(),
+    binds: {}, warmed: {}, obs: [], docs: [], mos: [], started: false,
+  };
+
+  function gcKb(n) {
+    n = num(n);
+    if (n < 1024) return n + ' B';
+    return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : (n / 1024).toFixed(0) + ' KB';
+  }
+  function gcSupported() {
+    try { return typeof HWIN.ImageDecoder === 'function'; } catch (e) { return false; }
+  }
+
+  /** 关掉解码器，顺手释放缓存里的位图（ImageBitmap 不 close 会一直占着） */
+  function gcClose() {
+    TGGC.cache.forEach((f) => { try { f.bmp.close(); } catch (e) {} });
+    TGGC.cache.clear();
+    if (TGGC.dec) { try { TGGC.dec.close(); } catch (e) {} }
+    TGGC.dec = null; TGGC.count = 0; TGGC.w = 0; TGGC.h = 0;
+  }
+
+  /**
+   * 按需解一帧。ImageDecoder 支持 frameIndex 随机取帧，不用把前面的都解一遍；
+   * 超过 TGGC_STORE 宽的降采样存着 —— 既省内存，也够 3:4 封面用。
+   */
+  async function gcFrame(i) {
+    if (!TGGC.dec) throw new Error('还没有载入 GIF');
+    const hit = TGGC.cache.get(i);
+    if (hit) { TGGC.cache.delete(i); TGGC.cache.set(i, hit); return hit; }
+    const res = await TGGC.dec.decode({ frameIndex: i });
+    const iw = res.image.displayWidth, ih = res.image.displayHeight;
+    const dur = res.image.duration || 0;            // 微秒
+    let bmp = await HWIN.createImageBitmap(res.image);
+    try { res.image.close(); } catch (e) {}
+    let w = iw, h = ih;
+    if (iw > TGGC_STORE) {
+      const k = TGGC_STORE / iw;
+      w = Math.max(1, Math.round(iw * k));
+      h = Math.max(1, Math.round(ih * k));
+      const cv = HDOC.createElement('canvas');
+      cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+      try { bmp.close(); } catch (e) {}
+      bmp = await HWIN.createImageBitmap(cv);
+    }
+    const fr = { bmp, w, h, delayMs: Math.max(2, Math.round(dur / 1000)) };
+    TGGC.cache.set(i, fr);
+    while (TGGC.cache.size > TGGC_CACHE) {
+      const k = TGGC.cache.keys().next().value;
+      const old = TGGC.cache.get(k);
+      TGGC.cache.delete(k);
+      try { old.bmp.close(); } catch (e) {}
+    }
+    return fr;
+  }
+
+  /** 打开一段 GIF 字节：先确认新文件有帧，再替换手里的旧 GIF（坏文件不该把旧图顶掉） */
+  async function gcOpen(bytes) {
+    if (!gcSupported()) throw new Error('这个浏览器不支持逐帧解码（需要 Chromium 内核）');
+    const d = new HWIN.ImageDecoder({ data: bytes, type: 'image/gif' });
+    await d.tracks.ready;
+    const track = d.tracks.selectedTrack;
+    const count = (track && track.frameCount) || 0;
+    if (!count) { try { d.close(); } catch (e) {} throw new Error('这张 GIF 读不到帧'); }
+    gcClose();
+    TGGC.dec = d; TGGC.count = count;
+    const first = await gcFrame(0);
+    TGGC.w = first.w; TGGC.h = first.h;
+    return { count, w: TGGC.w, h: TGGC.h };
+  }
+
+  /* ---------- 裁剪框（canvas 坐标）→ 封面图 ---------- */
+  /**
+   * 把 frame 按 fit / box 裁出来，输出 ratio 比例、宽度不超过 outW。
+   * fit / box 是裁剪浮层里那套 canvas 坐标，换算成原图比例后就跟具体尺寸无关了。
+   */
+  function gcCropCanvas(frame, fit, box, ratio, outW) {
+    const iw = frame.w, ih = frame.h;
+    const nx = (box.x - fit.x) / fit.w;
+    const ny = (box.y - fit.y) / fit.h;
+    const nw = box.w / fit.w;
+    const nh = box.h / fit.h;
+    const sx = Math.max(0, Math.min(nx, 1)) * iw;
+    const sy = Math.max(0, Math.min(ny, 1)) * ih;
+    const sw = Math.max(2, Math.min(nw * iw, iw - sx));
+    const sh = Math.max(2, Math.min(nh * ih, ih - sy));
+    const w = Math.max(2, Math.round(Math.min(outW || sw, sw)));
+    const h = Math.max(2, Math.round(w / ratio));
+    const cv = HDOC.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const g = cv.getContext('2d');
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(frame.bmp, sx, sy, sw, sh, 0, 0, w, h);
+    return cv;
+  }
+  function gcToUrl(cv) {
+    let url = cv.toDataURL('image/webp', 0.95);
+    if (url.indexOf('data:image/webp') !== 0) url = cv.toDataURL('image/png');
+    return url;
+  }
+  function gcCoverUrl(frame, fit, box, outW) {
+    return gcToUrl(gcCropCanvas(frame, fit, box, 0.75, outW || 520));
+  }
+  /** LINK：整条按 432:320 裁，再按 9/16 切左右两片（与工具箱的 LINK 裁剪同一套几何） */
+  function gcLinkPair(frame, fit, box) {
+    const cv = gcCropCanvas(frame, fit, box, 432 / 320, 720);
+    const half = Math.max(2, Math.round(cv.width * 9 / 16));
+    const cut = (sx) => {
+      const o = HDOC.createElement('canvas');
+      o.width = half; o.height = cv.height;
+      o.getContext('2d').drawImage(cv, sx, 0, half, cv.height, 0, 0, half, cv.height);
+      return gcToUrl(o);
+    };
+    return [cut(0), cut(Math.max(0, cv.width - half))];
+  }
+
+  /* ---------- 覆盖层：把某一帧盖在塔图上 ---------- */
+  function gcMyUid() {
+    if (TGT.me && TGT.me.id) return String(TGT.me.id);
+    try {
+      const o = JSON.parse(HWIN.localStorage.getItem('tinygrail:user-assets') || '0');
+      if (o && o.id) return String(o.id);
+    } catch (e) {}
+    return '';
+  }
+  /** 覆盖层样式要注入到它所在的文档里（塔图可能在子 iframe） */
+  function gcDocStyle(d) {
+    try {
+      if (!d || d.getElementById('tgtk-gifov-style')) return;
+      const st = d.createElement('style');
+      st.id = 'tgtk-gifov-style';
+      st.textContent = '.tgtk-gifov{position:absolute;inset:0;z-index:1;pointer-events:none}' +
+        '.tgtk-gifov img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}';
+      (d.head || d.documentElement).appendChild(st);
+    } catch (e) {}
+  }
+  const GC_SEL = '#tg-temple, #tg-temple-link-left, #tg-temple-link-right';
+  function gcHostKey(host) {
+    const ds = host && host.dataset;
+    if (!ds || ds.characterId === undefined || ds.userId === undefined) return '';
+    return String(ds.characterId) + ':' + String(ds.userId);
+  }
+  /** 塔图的封面层：GIF 是 canvas 的父级；静态图是那个 absolute inset-0 overflow-hidden 的 div */
+  function gcCoverBox(host) {
+    const cv = host.querySelector('canvas');
+    if (cv && cv.parentElement) return cv.parentElement;
+    const imgs = host.querySelectorAll('img');
+    for (let i = 0; i < imgs.length; i++) {
+      if (imgs[i].closest && imgs[i].closest('.tgtk-gifov')) continue;
+      if (imgs[i].parentElement) return imgs[i].parentElement;
+    }
+    const divs = host.querySelectorAll('div');
+    for (let i = 0; i < divs.length; i++) {
+      const cls = divs[i].className || '';
+      if (typeof cls === 'string' && /\babsolute\b/.test(cls) && /\binset-0\b/.test(cls) &&
+        /\boverflow-hidden\b/.test(cls)) return divs[i];
+    }
+    return null;
+  }
+  /** 站点是不是正在这张卡上播原 GIF（播放时 canvas 被 replaceWith 成了 img） */
+  function gcPlaying(box) {
+    if (box.querySelector('canvas')) return false;
+    const imgs = box.querySelectorAll('img');
+    for (let i = 0; i < imgs.length; i++) {
+      if (!imgs[i].closest || !imgs[i].closest('.tgtk-gifov')) return true;
+    }
+    return false;
+  }
+  /** LINK 两半共用一个 playbackGroup：一半变另一半跟着变，显隐必须整组同步 */
+  function gcLinkBoxes(box) {
+    const wrap = box.closest ? box.closest('#tg-temple-link') : null;
+    if (!wrap) return null;
+    const out = [];
+    ['#tg-temple-link-left', '#tg-temple-link-right'].forEach((sel) => {
+      const host = wrap.querySelector(sel);
+      const b = host && gcCoverBox(host);
+      if (b && out.indexOf(b) < 0) out.push(b);
+    });
+    return out.length ? out : null;
+  }
+  function gcShow(box, on) {
+    const ov = box && box.querySelector('.tgtk-gifov');
+    if (ov) ov.style.display = on ? 'block' : 'none';
+  }
+  function gcSync(box) {
+    if (!box) return;
+    const playing = gcPlaying(box);
+    const group = gcLinkBoxes(box);
+    if (group) { group.forEach((b) => gcShow(b, !playing)); return; }
+    gcShow(box, !playing);
+  }
+  /** dataURL 预热进解码缓存：重贴的瞬间就要有像素，否则会先空一帧 */
+  function gcWarm(url) {
+    if (!url || TGGC.warmed[url]) return;
+    try {
+      const im = new HWIN.Image();
+      im.src = url;
+      if (im.decode) im.decode().then(() => { TGGC.warmed[url] = im; }, () => {});
+      else TGGC.warmed[url] = im;
+    } catch (e) {}
+  }
+  function gcMount(box, url) {
+    if (!box) return;
+    gcWarm(url);
+    const d = box.ownerDocument || HDOC;
+    gcDocStyle(d);
+    let ov = box.querySelector('.tgtk-gifov');
+    if (!ov) {
+      ov = d.createElement('div');
+      ov.className = 'tgtk-gifov';
+      const im = d.createElement('img');
+      im.alt = '';
+      im.decoding = 'sync';
+      ov.appendChild(im);
+      // 插在 canvas 之后、播放键之前：压住塔图，又被站点 z-10 的播放键压住
+      const btn = box.querySelector('button');
+      if (btn) box.insertBefore(ov, btn); else box.appendChild(ov);
+    }
+    const img = ov.querySelector('img');
+    if (url && img.__tgtkU !== url) { img.src = url; img.__tgtkU = url; }
+    if (!ov.__tgtkMo) {
+      const mo = new MutationObserver(() => gcSync(box));
+      mo.observe(box, { childList: true });
+      ov.__tgtkMo = mo;
+      TGGC.obs.push({ box, mo });
+    }
+    gcSync(box);
+  }
+  function gcApplyAll() {
+    if (!Object.keys(TGGC.binds).length) return;
+    for (const d of allDocs()) {
+      let hosts;
+      try { hosts = d.querySelectorAll(GC_SEL); } catch (e) { continue; }
+      for (let i = 0; i < hosts.length; i++) {
+        const host = hosts[i];
+        const key = gcHostKey(host);
+        if (!key) continue;
+        const url = TGGC.binds[key] || TGGC.binds[key.split(':')[0] + ':*'];
+        if (!url) continue;
+        const box = gcCoverBox(host);
+        if (box) gcMount(box, url);
+      }
+    }
+    // 掉出页面的观察器（React 重建后旧节点会断开）
+    TGGC.obs = TGGC.obs.filter((o) => {
+      if (o.box && o.box.isConnected) return true;
+      try { o.mo.disconnect(); } catch (e) {}
+      return false;
+    });
+  }
+  function gcTempleish(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (/^tg-temple/.test(node.id || '')) return true;
+    return !!(node.querySelector && node.querySelector(GC_SEL));
+  }
+  function gcDocMutation(muts) {
+    if (!Object.keys(TGGC.binds).length) return;
+    let hit = false;
+    for (let i = 0; i < muts.length && !hit; i++) {
+      const m = muts[i];
+      if (m.type !== 'childList') continue;
+      const add = m.addedNodes, rem = m.removedNodes;
+      for (let j = 0; j < add.length && !hit; j++) if (gcTempleish(add[j])) hit = true;
+      for (let j = 0; j < rem.length && !hit; j++) {
+        const n = rem[j];
+        if (n.nodeType !== 1) continue;
+        if (gcTempleish(n)) { hit = true; break; }
+        if (n.classList && n.classList.contains('tgtk-gifov')) { hit = true; break; }
+        if (n.querySelector && n.querySelector('.tgtk-gifov')) { hit = true; break; }
+      }
+    }
+    // 观察器回调跑在微任务里：同步补回去就赶在浏览器绘制之前，关弹窗不会闪原图
+    if (hit) gcApplyAll();
+  }
+  function gcWatch() {
+    if (TGGC.started) return;
+    TGGC.started = true;
+    const attach = () => {
+      for (const d of allDocs()) {
+        if (!d || !d.documentElement || TGGC.docs.indexOf(d) >= 0) continue;
+        TGGC.docs.push(d);
+        try {
+          const mo = new MutationObserver(gcDocMutation);
+          mo.observe(d.documentElement, { childList: true, subtree: true });
+          TGGC.mos.push(mo);
+        } catch (e) {}
+      }
+    };
+    attach();
+    setInterval(() => {
+      try { if (HWIN.__TGTK_HOST__ !== HOST_TOKEN) return; } catch (e) {}
+      attach();
+      gcApplyAll();
+    }, 1500);
+  }
+  function gcSaveBinds() {
+    try {
+      if (!Object.keys(TGGC.binds).length) HWIN.localStorage.removeItem(TGGC_LS);
+      else HWIN.localStorage.setItem(TGGC_LS, JSON.stringify(TGGC.binds));
+      return true;
+    } catch (e) {
+      tgToast('封面存不下了（本地存储满了），这次只在当前页面生效');
+      return false;
+    }
+  }
+  function gcLoadBinds() {
+    let n = 0;
+    try {
+      const o = JSON.parse(HWIN.localStorage.getItem(TGGC_LS) || 'null');
+      if (o && typeof o === 'object') {
+        Object.keys(o).forEach((k) => {
+          if (typeof o[k] === 'string' && /^data:image\//.test(o[k])) { TGGC.binds[k] = o[k]; n++; }
+        });
+      }
+    } catch (e) {}
+    return n;
+  }
+  /** 贴一张封面：cid 必填；uid 拿不到就用 *（只在读不到登录信息时兜底） */
+  function gcBind(cid, uid, url) {
+    if (!cid || !url) return '';
+    const key = String(cid) + ':' + String(uid || gcMyUid() || '*');
+    TGGC.binds[key] = url;
+    gcWarm(url);
+    gcSaveBinds();
+    gcApplyAll();
+    return key;
+  }
+  function gcClear() {
+    TGGC.binds = {};
+    TGGC.obs.forEach((o) => { try { o.mo.disconnect(); } catch (e) {} });
+    TGGC.obs = [];
+    for (const d of allDocs()) {
+      try {
+        const list = d.querySelectorAll('.tgtk-gifov');
+        for (let i = 0; i < list.length; i++) list[i].remove();
+      } catch (e) {}
+    }
+    gcSaveBinds();
+  }
+  function gcCoverCount() { return Object.keys(TGGC.binds).length; }
+
+  /** 页面一开就把上次贴过的 GIF 封面复原（站点 React 异步渲染，观察器 + 轮询一起兜） */
+  function startGifCovers() {
+    const n = gcLoadBinds();
+    gcWatch();
+    if (n) {
+      gcApplyAll();
+      setTimeout(gcApplyAll, 400);
+      setTimeout(gcApplyAll, 1200);
+    }
+  }
+
   // ---------- 自建 3:4 裁剪浮层 ----------
   /** 和 h() 一样，但节点直接建在指定文档里：canvas 跨文档 adopt 会丢位图，避免留坑 */
   function tgH(doc, tag, attrs, ...kids) {
@@ -14246,6 +14668,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   }
 
   function tgCropClose() {
+    try { if (TGT.gifStop) { const f = TGT.gifStop; TGT.gifStop = null; f(); } } catch (e) {}
     for (const d of allDocs()) {
       const p = d.getElementById && d.getElementById('tgtk-crop');
       if (!p) continue;
@@ -14276,6 +14699,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       outMime: 'image/jpeg', rawDataUrl: '', rawMime: '', rawFile: null,
       // GIF / APNG：canvas 只能取一帧，交给站点自己的上传通道（保住动画）
       animated: false, rawUrl: '',
+      // 「GIF封面」要用：GIF 原始字节（只解析帧，不重编码）
+      gifBytes: null,
+      // 当前塔图本身就是 GIF 时，从接口捞回来的地址（点「GIF封面」直接读它，不用再选文件）
+      autoGifUrl: '',
       // 「图片地址」框里那串 URL：srcUrl = 提交用的规范地址，srcRaw = 用户给的原样地址（预览用）
       srcUrl: '', srcRaw: '',
       // 用户有没有动过裁剪框：没动过就按原地址提交，画质不损失
@@ -14290,6 +14717,16 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     // 左边靠左、右边靠右（重叠 12.5% = 54px），切出来贴上去才严丝合缝。
     const RATIO = link ? 432 / 320 : 0.75; // 宽 / 高
     let curHalf = 'left';            // 本塔用左半还是右半
+
+    /* ---- GIF 选帧（点「GIF封面」进入；比例跟着本浮窗，单塔 3:4 / LINK 432:320） ---- */
+    let gifMode = false;             // 是否在逐帧选封面
+    let gifIdx = 0;                  // 当前选中的帧
+    let gifPlaying = false;
+    let gifTimer = 0;
+    let gifTok = 0;                  // 取帧竞态保护
+    let gifOnly = false;             // 只更换封面：只贴图，不重新生成 GIF
+    let gifBusy = false;
+    let fitGap = null;               // LINK：用留白把浮窗总高锁在开窗那一刻（盒子建好后赋值）
 
     /** OSS 路径 / 相对地址 → 可直接显示的原图地址 */
     const normCover = (u) => {
@@ -14319,10 +14756,41 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       tgH(cropDoc, 'option', { value: 'full' }, '原图画质（推荐）'),
       tgH(cropDoc, 'option', { value: '480' }, '标准 480×640')
     );
+    /* GIF 选帧全在这一行：◀ 第 N/M 帧 ▶  播放预览 ……  清除封面  GIF封面
+       平时（非选帧）只留最右边的「GIF封面」，紧跟在「裁剪大小」那行下面 */
+    const gifPrev = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-step', 'data-tgtk': '1', title: '上一帧' }, '◀');
+    const gifNext = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-step', 'data-tgtk': '1', title: '下一帧' }, '▶');
+    const gifNo = tgH(cropDoc, 'span', { class: 'tgtk-crop-fno' }, '—');
+    const gifPlayBtn = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-playbtn', 'data-tgtk': '1' }, '播放预览');
+    gifPlayBtn.disabled = true;      // 没载入 GIF 时按不动，但位置留着
+    const gifBtn = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-gifbtn', 'data-tgtk': '1' }, 'GIF封面');
+    const gifClear = tgH(cropDoc, 'button', { type: 'button', class: 'tgtk-crop-gifbtn', 'data-tgtk': '1', title: '删掉本塔已贴的 GIF 封面' }, '清除封面');
+    gifClear.hidden = true;
+    const gifSp = tgH(cropDoc, 'span', { class: 'tgtk-crop-sp' });    // 宽度是量出来的，见 alignGifBar
+    const gifSp2 = tgH(cropDoc, 'span', { class: 'tgtk-crop-sp' });   // 把「GIF封面」顶到滑杆右端
+    /* 「输出画质」和「GIF封面」同一行：输出画质贴左边（与「本地图片」同列），GIF封面贴右边。
+       选帧时输出画质收起、换成步进键。「清除封面」不在这行，放到底部按钮栏最左。 */
+    const qWrap = tgH(cropDoc, 'span', { class: 'tgtk-crop-qwrap' },
+      tgH(cropDoc, 'label', null, '输出画质'), qSel);
+    const gifBar = tgH(cropDoc, 'div', { class: 'tgtk-crop-gifrow' },
+      qWrap, gifPrev, gifNo, gifNext, gifSp, gifPlayBtn, gifSp2, gifBtn);
+    const gifInfo = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, '还没有载入 GIF');
+    gifInfo.hidden = true;
+    /* 当前塔图的 GIF 读不到时（CDN 没有跨域头）给一条能点的出路 */
+    const gifOpen = tgH(cropDoc, 'a', { class: 'tgtk-crop-openlink', href: '#', target: '_blank',
+      rel: 'noopener noreferrer', title: '在新标签打开本塔的 GIF，另存后拖进上面的黑色区域' }, '本塔GIF可另存后拖入');
+    const gifOpenRow = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip', hidden: '' }, gifOpen);
+    const gifOnlyChk = tgH(cropDoc, 'input', { type: 'checkbox', 'data-tgtk': '1' });
+    const gifOnlyRow = tgH(cropDoc, 'label', { class: 'tgtk-crop-chk', hidden: '' }, gifOnlyChk,
+      tgH(cropDoc, 'span', null, '只更换封面（只在本机贴图，不改站点上的 GIF）'));
     const stage = tgH(cropDoc, 'div', { class: 'tgtk-crop-stage' }, cvs,
       tgH(cropDoc, 'div', { class: 'tgtk-crop-drop' }, '松开即可载入这张图片'));
-    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' },
-      '把图片拖进上面的黑色区域，或点「选择文件」；也可直接 Ctrl+V 粘贴截图');
+    /* 说明行 + GIF 信息行放同一个定高盒子里：单塔模式固定占两行，
+       点「GIF封面」长出信息行时浮窗长度不变（用户 2026-11-12 要求） */
+    const TIP_DEFAULT = '把图片拖进上面的黑色区域，或点「选择文件」；也可直接 Ctrl+V 粘贴截图';
+    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, TIP_DEFAULT);
+    const infoBox = tgH(cropDoc, 'div', { class: 'tgtk-crop-info' + (link ? '' : ' tgtk-info-fixed') },
+      tip, gifInfo, gifOpenRow);
 
     /** 裁剪框对应到原图上的像素范围，以及最终输出尺寸（LINK 模式按「一半」算） */
     const outSize = (s) => {
@@ -14362,6 +14830,24 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       (s || st).outMime === 'image/webp' ? 'WebP' :
       (s || st).outMime === 'image/gif' ? 'GIF 动图（走小圣杯上传）' : 'JPEG 质量 100';
     const refreshTip = () => {
+      if (link) { tip.textContent = ''; return; }   // LINK 不要说明行（用户要求），信息都在按键和帧信息里
+      if (gifMode) {
+        if (!TGGC.count) {
+          /* LINK 不留提示行（用户要求）；单塔至少留一句怎么办，别让这行空成一条缝 */
+          tip.textContent = link ? ''
+            : (st.autoGifUrl ? '本塔封面就是 GIF：点下面链接另存后拖进来'
+              : '还没有载入 GIF：把 .gif 拖进上面的黑色区域，或点左边「选择文件」');
+          return;
+        }
+        const how = link
+          ? '切成两张 3:4，' + (chk.checked && partnerMine
+            ? '另一半给 ' + (link.linkName || 'LINK 圣殿') : '只贴本塔')
+          : (gifOnly
+            ? '只在本机贴图'
+            : '贴封面 + 原 GIF 直交');
+        tip.textContent = '第 ' + (gifIdx + 1) + ' / ' + TGGC.count + ' 帧 · ' + how;
+        return;
+      }
       if (st.animated) {
         tip.textContent = 'GIF 动图无法裁剪，将交给小圣杯自己的上传通道（保留动画）' +
           (st.rawUrl ? ' · 按原地址提交' : ' · 原文件直交') +
@@ -14374,12 +14860,230 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         return;
       }
       const o = outSize();
-      if (!o) return;
+      if (!o) { tip.textContent = TIP_DEFAULT; return; }   // 没图也要留说明，别让这一行空掉
       const which = curHalf === 'right' ? '右半' : '左半';
       tip.textContent = (link ? '两张各 ' + o.w + '×' + o.h + '（' + which + '给本塔，重叠约 12.5%），' : '') +
         '拖动裁剪框移动，拉右下角或滑杆缩放；输出 ' + o.w + '×' + o.h + ' · ' +
         mimeOf() + (o.raw ? ' · 原文件直传' : '') +
         (link ? (chk.checked && partnerMine ? ' · 另一半给 ' + (link.linkName || 'LINK 圣殿') : ' · 只换本塔') : '');
+    };
+
+    /* ====================== GIF 选帧 ====================== */
+    /** 取 GIF 原始字节：本地文件直接读；地址类先试 fetch（跨域就只能换本地文件） */
+    const gifBytesOf = async (side) => {
+      if (side.gifBytes) return side.gifBytes;
+      if (side.rawFile && side.rawFile.arrayBuffer) {
+        const buf = await side.rawFile.arrayBuffer();
+        side.gifBytes = new Uint8Array(buf);
+        return side.gifBytes;
+      }
+      if (side.rawUrl) {
+        const r = await fetch(side.rawUrl, { mode: 'cors' });
+        if (!r.ok) throw new Error('这个地址读不到 GIF（HTTP ' + r.status + '），换成本地文件');
+        const buf = await r.arrayBuffer();
+        side.gifBytes = new Uint8Array(buf);
+        return side.gifBytes;
+      }
+      /* 注意：当前塔图本身是 GIF 时不在这里读 —— 封面 CDN 不回 CORS 头、OSS 直连 403，
+         浏览器拿不到它的字节（用户 2026-11-12 拍板：不试，只给另存入口）。 */
+      return null;
+    };
+
+    const updateGifLabel = () => {
+      gifNo.textContent = TGGC.count ? ('第 ' + (gifIdx + 1) + ' / ' + TGGC.count + ' 帧') : '—';
+    };
+
+    /** 把选中的帧画进预览画布：沿用浮窗的裁剪框，只换像素来源 */
+    const showGifFrame = async (i, keepBox) => {
+      const t = ++gifTok;
+      try {
+        const n = TGGC.count;
+        const k = ((i % n) + n) % n;
+        const fr = await gcFrame(k);
+        if (t !== gifTok || !gifMode) return;
+        gifIdx = k;
+        st.img = fr.bmp;
+        const W = cvs.width, H = cvs.height;
+        const sc = Math.min(W / fr.w, H / fr.h);
+        st.fit = { x: (W - fr.w * sc) / 2, y: (H - fr.h * sc) / 2, w: fr.w * sc, h: fr.h * sc };
+        if (!keepBox || !st.box) sizeBox(Number(range.value || 100) / 100);
+        else clampBox();
+        draw();
+        updateGifLabel();
+        refreshTip();
+      } catch (e) {
+        if (t === gifTok) gifInfo.textContent = '取帧失败：' + (e && e.message ? e.message : e);
+      }
+    };
+
+    const stopGifPlay = () => {
+      gifPlaying = false;
+      clearTimeout(gifTimer);
+      gifPlayBtn.textContent = '播放预览';
+    };
+
+    const startGifPlay = () => {
+      if (!gifMode || !TGGC.count) return;
+      gifPlaying = true;
+      gifPlayBtn.textContent = '暂停';
+      const tick = async () => {
+        if (!gifPlaying) return;
+        await showGifFrame(gifIdx + 1, true);
+        if (!gifPlaying) return;
+        const fr = TGGC.cache.get(gifIdx);
+        gifTimer = setTimeout(tick, fr ? fr.delayMs : 80);
+      };
+      tick();
+    };
+
+    /** 两种模式切换时，把「输出画质 / 图片地址」和 GIF 的键对调 */
+    const gifUI = () => {
+      /* 步进键 / 帧号 / 播放预览只在选帧时出现；「GIF封面」一直都在最右边 */
+      gifPrev.hidden = gifNo.hidden = gifNext.hidden = gifPlayBtn.hidden = !gifMode;
+      gifInfo.hidden = !gifMode;
+      if (link) infoBox.hidden = !gifMode;      // LINK 平时不留说明行，选帧时才用这格放帧信息
+      gifOnlyRow.hidden = !gifMode || !!link;   // LINK 不支持 GIF 直传，只能贴图
+      gifPlayBtn.disabled = !TGGC.count;      // 没帧时留着位置，按不动
+      gifPrev.disabled = gifNext.disabled = !TGGC.count;
+      gifBtn.classList.toggle('on', gifMode);
+      const thisKey = target.cid ? (String(target.cid) + ':' + String(target.uid || gcMyUid() || '*')) : '';
+      gifClear.hidden = !(thisKey && TGGC.binds[thisKey]);
+      qWrap.hidden = gifMode;            // 输出画质对 GIF 没意义，藏掉（同一行换成步进键）
+      gifSp2.hidden = !gifMode;          // 非选帧时不撑开，让输出画质贴着 GIF封面
+      rowUrl.hidden = gifMode && !link;   // 单塔选帧时这格换成「只更换封面」；LINK 没有这一项，地址行留着不留空
+      setTimeout(() => { alignGifBar(); if (fitGap) fitGap(); }, 0);   // 等这一帧布局算完再量
+    };
+
+    /**
+     * 「播放预览」的左边缘对齐「裁剪大小」标签的左边缘（用户指定）。
+     * flex 里靠 spacer 撑，宽度是量出来的：窗口 / 折叠 / 换图后都会变，所以每次 gifUI 都重量一次。
+     */
+    const alignGifBar = () => {
+      if (!gifMode) { gifSp.style.flex = ''; gifSp.style.width = ''; return; }
+      try {
+        if (!gifBar.getBoundingClientRect().width) return;
+        const lr = labSize.getBoundingClientRect();
+        if (!lr.width) return;
+        /* 直接拿「播放预览」的实际位置去补差：行里按钮的显隐会变，gap 段数不能写死 */
+        const cur = gifSp.getBoundingClientRect().width || 0;
+        const dw = lr.left - gifPlayBtn.getBoundingClientRect().left;
+        if (Math.abs(dw) < 0.6) return;
+        gifSp.style.flex = '0 0 auto';
+        gifSp.style.width = Math.max(6, Math.round(cur + dw)) + 'px';
+      } catch (e) {}
+    };
+
+    const exitGif = (reload) => {
+      stopGifPlay();
+      gcClose();              // 退出就释放帧缓存，下次进来重新解
+      gifOpenRow.hidden = true;
+      gifMode = false;
+      updateGifLabel();
+      gifUI();
+      if (reload !== false && (st.rawDataUrl || st.rawUrl)) {
+        load(st.rawDataUrl || st.rawUrl, !st.rawDataUrl, st);
+      } else {
+        draw();
+        refreshTip();
+      }
+    };
+
+    const enterGif = async () => {
+      if (gifBusy) return;
+      if (!st.animated) {
+        // 手里没有动图：顺手把上一张 GIF 的解码器收掉，别让帧号串到这张静态图上
+        stopGifPlay();
+        gcClose();
+        updateGifLabel();
+        gifUI();
+        gifInfo.hidden = true;
+        if (st.autoGifUrl) {
+          /* 本塔本来就是 GIF：不尝试读取（读不到），只留一个另存入口 */
+          gifOpen.href = st.autoGifUrl;
+          gifOpenRow.hidden = false;
+          tip.textContent = '本塔封面就是 GIF：点下面的链接另存后拖进来';
+          return;
+        }
+        gifOpenRow.hidden = true;
+        refreshTip();
+        return;
+      }
+      gifBusy = true;
+      gifInfo.hidden = false;
+      gifInfo.textContent = '正在解析 GIF 帧…';
+      try {
+        if (!st.animated) gifInfo.textContent = '正在读取当前塔图的 GIF…';
+        const bytes = await gifBytesOf(st);
+        if (!bytes) throw new Error('读不到 GIF 字节，换成本地文件试试');
+        const info = await gcOpen(bytes);
+        gifMode = true;
+        gifOpenRow.hidden = true;
+        stopGifPlay();
+        gifUI();
+        await showGifFrame(gifIdx < info.count ? gifIdx : 0);
+        gifInfo.textContent = '原图 ' + info.w + '×' + info.h + ' · ' + gcKb(bytes.length) +
+          ' · 共 ' + info.count + ' 帧' +
+          (bytes.length > TGGC_MAX ? ' · 超10MB，只能贴封面' : '');
+      } catch (e) {
+        gifMode = false;
+        gifUI();
+        gifInfo.hidden = false;
+        gifInfo.textContent = '解析失败：' + (e && e.message ? e.message : e);
+        tgToast('GIF 解析失败：' + (e && e.message ? e.message : e));
+      } finally {
+        gifBusy = false;
+      }
+    };
+
+    gifBtn.addEventListener('click', () => {
+      if (gifMode) { exitGif(); return; }
+      gifMode = true;
+      gifUI();                  // 没有 GIF 时步进键是禁用的，提示会说明先载入
+      enterGif();
+    });
+    gifPrev.addEventListener('click', () => { stopGifPlay(); showGifFrame(gifIdx - 1); });
+    gifNext.addEventListener('click', () => { stopGifPlay(); showGifFrame(gifIdx + 1); });
+    gifPlayBtn.addEventListener('click', () => { if (gifPlaying) stopGifPlay(); else startGifPlay(); });
+    gifOnlyChk.addEventListener('change', () => { gifOnly = !!gifOnlyChk.checked; refreshTip(); });
+    gifClear.addEventListener('click', () => {
+      const keys = [];
+      if (target.cid) keys.push(String(target.cid) + ':' + String(target.uid || gcMyUid() || '*'));
+      if (link && link.linkCid) keys.push(String(link.linkCid) + ':' + String(link.linkUid || gcMyUid() || '*'));
+      let n = 0;
+      keys.forEach((k) => { if (TGGC.binds[k]) { delete TGGC.binds[k]; n++; } });
+      gcSaveBinds();
+      gcApplyAll();
+      gifUI();
+      tgToast(n ? '已清除本塔的 GIF 封面（刷新后也不会再出现）' : '本塔还没有贴过 GIF 封面');
+    });
+
+    /**
+     * 打开浮窗时顺手看一眼：当前这座塔的封面本来就是 .gif 吗？
+     * 是的话把地址记下来，点「GIF封面」直接读它，省得再拖一次文件。
+     * 新版塔图是 canvas 画的，DOM 里没有地址，只能按塔主从 chara/temple/{cid} 捞。
+     */
+    const probeOwnGif = async () => {
+      try {
+        if (link) return;   // LINK 要的是整条拼图，读单塔会自动读成「只要一半」
+        if (!target || !target.cid || st.animated || st.autoGifUrl) return;
+        /* 按「当前登录用户」定位这座塔，别被上一次点过的塔主带偏 */
+        const cover = await tgTempleCover({
+          cid: target.cid,
+          uid: target.uid || gcMyUid() || '',
+          userName: (TGT.last && String(TGT.last.cid) === String(target.cid) &&
+            TGT.last.userName) || '',
+        });
+        if (st.animated || st.autoGifUrl) return;      // 期间用户自己选了图
+        if (!cover || !/\.gif(?:$|[?#])/i.test(cover)) return;
+        const url = tgCdnCover(cover) || cover;
+        if (!url) return;
+        st.autoGifUrl = url;
+        if (!gifMode) {
+          gifInfo.hidden = false;
+          gifInfo.textContent = '当前塔图是 GIF：点「GIF封面」可另存后拖入';
+          setTimeout(() => { if (!gifMode) gifInfo.hidden = true; }, 5000);
+        }
+      } catch (e) {}
     };
 
     /** LINK 模式：切换「本塔用左半 / 右半」 */
@@ -14402,7 +15106,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       ctx.fillRect(0, 0, W, H);
       const f = st.fit;
       ctx.drawImage(st.img, f.x, f.y, f.w, f.h);
-      if (st.animated) return; // 动图不画裁剪框：框了也裁不出来
+      if (st.animated && !gifMode) return; // 纯动图不画裁剪框：框了也裁不出来
       const b = st.box;
       if (!b) return;
       ctx.fillStyle = 'rgba(0,0,0,.55)';
@@ -14489,7 +15193,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         dst.box = null;
         dst.touched = false; // 新图进来算「没动过裁剪框」
         if (dst !== st) { resolve(true); return; } // 已经切到另一侧：静默存下即可
-        range.disabled = !!st.animated || !!st.urlOnly;
+        range.disabled = (!!st.animated && !gifMode) || !!st.urlOnly;
+        // 已经在逐帧选封面时换文件：新 GIF 直接重新解析，换成静态图就退出选帧
+        if (gifMode) {
+          (cropDoc.defaultView || window).setTimeout(() => {
+            if (!gifMode) return;
+            if (st.animated) enterGif(); else exitGif(false);
+          }, 0);
+        }
         if (st.animated) { draw(); refreshTip(); resolve(true); return; }
         // 小圣杯封面的「地址提交」模式：只预览，不画裁剪框（裁剪框画了也用不上）
         if (st.urlOnly) { draw(); refreshTip(); resolve(true); return; }
@@ -14577,6 +15288,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         dst.rawUrl = '';
         dst.srcUrl = '';
         dst.srcRaw = '';
+        dst.gifBytes = null;                  // 新文件：旧的字节作废
         dst.outMime = gif ? 'image/gif' : tgOutMime(f.type || dst.rawMime);
         load(raw, false, dst);
       };
@@ -14638,7 +15350,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       };
     };
     cvs.addEventListener('pointerdown', (e) => {
-      if (st.animated || st.urlOnly || !st.box) return;
+      if ((st.animated && !gifMode) || st.urlOnly || !st.box) return;
       const p = pos(e), b = st.box;
       const corner = Math.abs(p.x - (b.x + b.w)) < 16 && Math.abs(p.y - (b.y + b.h)) < 16;
       if (corner) st.drag = { mode: 'size', sx: p.x, w: b.w };
@@ -14718,9 +15430,47 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       return renderRegion(s, rx, Math.round(o.sy), rw, Math.round(o.sh), rw, Math.round(o.sh));
     };
 
+    /**
+     * GIF 模式的「确定并更换」：
+     *   1) 先把选中帧裁成封面贴成覆盖层（立刻能看到，刷新还在）
+     *   2) 没勾「只更换封面」、也不是 LINK 时，接着走下面的正常流程 ——
+     *      也就是工具箱原来那套 GIF 直交（原文件 / 原地址，不重编码、动画完整保留）
+     * 返回 true = 继续往下走提交流程；false = 已经处理完（浮层已关）
+     */
+    const applyGif = async () => {
+      if (!TGGC.count) throw new Error('GIF 还没解析好，等它转完再点');
+      const fr = await gcFrame(gifIdx);
+      const uid = target.uid || gcMyUid();
+      if (link) {
+        const pair = gcLinkPair(fr, st.fit, st.box);
+        gcBind(target.cid, uid, pair[curHalf === 'right' ? 1 : 0]);
+        const wantOther = !!(chk.checked && partnerMine && link.linkCid);
+        if (wantOther) gcBind(link.linkCid, link.linkUid || '', pair[curHalf === 'right' ? 0 : 1]);
+        tgToast(wantOther ? '两座塔的封面都贴好了（只在本机生效）' : '本塔封面已贴好（只在本机生效）');
+        tgCropClose();
+        return false;
+      }
+      gcBind(target.cid, uid, gcCoverUrl(fr, st.fit, st.box, 520));
+      if (gifOnly || !st.animated) {
+        // !st.animated：这份帧是从当前塔图自己读的，GIF 本身没变，贴完就够
+        tgToast(gifOnly ? '封面已贴好（只在本机生效，站点上的 GIF 没动）'
+          : '封面已贴好（GIF 还是站点原来那张）');
+        tgCropClose();
+        return false;
+      }
+      // 封面已经贴好：切回普通模式，让「确定并更换」继续走原来的 GIF 直交
+      stopGifPlay();
+      gifMode = false;
+      updateGifLabel();
+      gifUI();
+      return true;
+    };
+
     const ok = tgBtn('确定并更换', '按所选画质导出后上传', async () => {
       ok.disabled = true;
       try {
+        // GIF 模式：先贴封面；没勾「只更换封面」就继续往下走原来的 GIF 直交
+        if (gifMode && !(await applyGif())) { ok.disabled = false; return; }
         // 地址框里有值但没按过回车：先记进状态，别让「确定」白报「请选择图片」
         try { await ensureUrl(); } catch (e) {}
         // ---- LINK 模式：一张拼图切两半，本塔拿选中的那半，另一半（可选）给 LINK 塔 ----
@@ -14834,31 +15584,39 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const cancel = tgBtn('取消', '关闭', tgCropClose);
     cancel.classList.add('tgtk-tcancel');
 
+    /** 第一行：本地图片 / 裁剪大小（下一行是「输出画质 + GIF封面」） */
+    const labSize = tgH(cropDoc, 'label', null, '裁剪大小');
+    const rowQ = tgH(cropDoc, 'div', { class: 'tgtk-crop-row' },
+      tgH(cropDoc, 'label', null, '本地图片'), file,
+      labSize, range
+    );
+    const rowUrl = tgH(cropDoc, 'div', { class: 'tgtk-crop-row' }, tgH(cropDoc, 'label', null, '图片地址'), urlIn);
+    /* 「图片地址」和「只更换封面」共用一格：点「GIF封面」时这格换热换掉，
+       格子高度固定，浮窗长度不跟着跳（用户 2026-11-12 要求） */
+    const slot = tgH(cropDoc, 'div', { class: 'tgtk-crop-slot' }, rowUrl, gifOnlyRow);
+    /* LINK 模式下说明行删掉了：多退少补都由这块留白吸收，浮窗总高等于开窗那一刻 */
+    const gap = tgH(cropDoc, 'div', { class: 'tgtk-crop-gap', hidden: '' });
+    /* LINK：本塔用左半 / 右半 与「另一半给 LINK 圣殿」同一行，勾选框靠右对齐 */
+    const tabRow = link ? tgH(cropDoc, 'div', { class: 'tgtk-crop-tabrow' },
+      tabs, tgH(cropDoc, 'span', { class: 'tgtk-crop-sp' }), partnerMine ? chkRow : null) : null;
     const box = tgH(cropDoc, 'div', { class: 'tgtk-crop-box', 'data-tgtk': '1' },
       tgH(cropDoc, 'div', { class: 'tgtk-crop-hd' },
         tgH(cropDoc, 'span', null, (link ? '裁剪 LINK 塔图 · ' : '裁剪塔图 · ') + (target.label || '我的圣殿')),
         tgH(cropDoc, 'button', { class: 'tgtk-crop-x', type: 'button', 'data-tgtk': '1', title: '关闭' }, '×')
       ),
       stage,
-      link ? tabs : null,
-      partnerMine ? chkRow : null,
-      tip,
-      tgH(cropDoc, 'div', { class: 'tgtk-crop-row' },
-        tgH(cropDoc, 'label', null, '本地图片'), file,
-        tgH(cropDoc, 'label', null, '裁剪大小'), range,
-        tgH(cropDoc, 'label', null, '输出画质'), qSel
-      ),
-      tgH(cropDoc, 'div', { class: 'tgtk-crop-row' }, tgH(cropDoc, 'label', null, '图片地址'), urlIn),
-      tgH(cropDoc, 'div', { class: 'tgtk-crop-ft' }, cancel, ok)
+      tabRow,
+      infoBox,
+      rowQ,
+      gifBar,
+      gap,                       // LINK：说明删掉后把高度补在这里，「图片地址」和底部按钮不动
+      slot,                      // 图片地址 / 只更换封面（同一个格子）
+      tgH(cropDoc, 'div', { class: 'tgtk-crop-ft' }, gifClear, cancel, ok)
     );
+    gifUI();   // 默认收起：只留「GIF封面」按钮
+    probeOwnGif();                       // 当前塔图本身是 GIF 就自动接上
+
     const overlay = tgH(cropDoc, 'dialog', { id: 'tgtk-crop', class: 'tgtk-crop', 'data-tgtk': '1' }, box);
-    if (partnerMine) {
-      tip.textContent = '把整张拼图拖进上面的黑色区域，框选范围（与 LINK 卡同比例 27:20）；点「确定并更换」会切成两张等大的 3:4 ——' +
-        '本塔拿你选的那一半，勾选后另一半给 LINK 圣殿。';
-    } else if (link) {
-      tip.textContent = '把整张拼图拖进上面的黑色区域，框选范围（与 LINK 卡同比例 27:20）后取一半换本塔；' +
-        'LINK 另一半不是你的圣殿，不会去动它。';
-    }
     // 站点弹窗的层级再高也不能盖住裁剪窗口
     overlay.style.setProperty('position', 'fixed', 'important');
     overlay.style.setProperty('z-index', '2147483647', 'important');
@@ -14906,7 +15664,31 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     TGT.paste = { doc: cropDoc, fn: onPaste };
     cropDoc.addEventListener('paste', onPaste, true);
 
-    cropDoc.body.appendChild(overlay);
+    (cropDoc.body || cropDoc.documentElement).appendChild(overlay);
+    /* LINK：说明文字整行不要（用户要求）。浮窗总高就锁在「开窗那一刻」：
+       说明行清空、选帧时长出帧信息、按键加间距，多出来的高度全部由这块留白吸收，
+       所以点「GIF封面」时浮窗长度不会跳（用户 2026-11-12 要求）。 */
+    if (link) {
+      const VW = cropDoc.defaultView || window;
+      /* 留白至少留这么高：既是「输出画质」和「图片地址」之间的呼吸，
+         也正好够选帧时长出来的那行帧信息吃掉，浮窗长度才不会跟着变 */
+      const GAP_MIN = 36;
+      let linkBaseH = 0;
+      fitGap = () => {
+        try {
+          const cur = box.getBoundingClientRect().height;
+          if (!cur) return;                        // 还没排版（dialog 没开）先不算
+          if (!linkBaseH) linkBaseH = cur + GAP_MIN;
+          gap.hidden = false;
+          gap.style.height = '0px';
+          const h = box.getBoundingClientRect().height;
+          gap.style.height = Math.max(0, Math.round(linkBaseH - h)) + 'px';
+        } catch (e) {}
+      };
+      /* 先量出「说明行还在」时的高度当基准，再把说明行清掉、补留白 */
+      VW.setTimeout(() => { fitGap(); tip.textContent = ''; fitGap(); }, 30);
+      VW.setTimeout(fitGap, 300);   // 字体晚到 / 首次布局晚一步时再兜一次
+    }
     // 关键：站点塔图弹窗是原生 <dialog>.showModal()（模态会让对话框外全部 inert），
     // 我们的浮层必须同样进入 top layer，才能真正接收点击，并压在站点 dialog 之上
     try {
@@ -14918,6 +15700,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     // 站点若用 inert 做焦点隔离，浮层会被连带禁用（可见但点不动），这里主动清掉
     try { overlay.inert = false; overlay.removeAttribute('inert'); } catch (e) {}
     TGT.crop = { overlay, st, doc: cropDoc };
+    // 浮窗一关就停播放 + 关解码器：GIF 位图不 close 会一直占着内存
+    TGT.gifStop = () => { try { stopGifPlay(); } catch (e) {} try { gcClose(); } catch (e) {} };
     tgHidePopups();
     if (!ctx) tip.textContent = '当前环境无法绘制画布，请换个浏览器';
   }
@@ -17990,7 +18774,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.34（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.39（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -18014,6 +18798,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     mountDockSwitch();
     syncFabVisible();
     startStarBadge();
+    // 上次贴过的 GIF 封面：站点每页都能复原（写在本地，不碰站点数据）
+    startGifCovers();
     // 旧版小圣杯页面增强（拍卖 / 圣殿 / 签到 / 小圣杯开关 / 萌王榜）也跟着页面常驻
     startGrailExtras();
     // 自动注资的定时器挂在 boot 里，而不是「打开面板」时：
@@ -18072,6 +18858,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       }
     } catch (e) {}
   }, 2000);
+
+  /* 离线测试钩子：只在 file:// 或显式 ?tgtk-test=1 时挂出来，正常使用不暴露。
+     有了它，测试页可以直接开裁剪浮层 / 调 GIF 几何，不用去驱动整个站点 DOM。 */
+  try {
+    const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
+    if (testing) {
+      HWIN.__TGTK_T__ = {
+        ver: '2.3.39', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
+        cropState: () => (TGT.crop && TGT.crop.st) || null,
+      };
+    }
+  } catch (e) {}
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
