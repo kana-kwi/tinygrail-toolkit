@@ -182,12 +182,18 @@
  *        · 不勾 → 贴好覆盖层，GIF 本身仍按原来的方式直交（原文件 / 原地址整段交给站点，
  *          不重编码、动画完整保留），全站生效
  *        · 浮窗长度固定：说明行 + 帧信息行占同一个定高格子，「图片地址」与「只更换封面」
- *          共用另一格，点「GIF封面」来回切都不会变高变矮；LINK 的说明行整行留空
- *          （要删掉的那两行说明按用户要求不出现，多出来的高度由「图片地址」上方的留白吸收）
+ *          共用另一格，点「GIF封面」来回切都不会变高变矮；LINK 不写说明，但那格一直留着，
+ *          给「本地图片」那排留出上边距（和选帧时位置一致），多出来的高度由下方留白吸收
+ *        · 本塔封面本来就是 GIF 时，说明文字不写，另存链接自己占第一行，第二行留空
  *        · 当前塔图本来就是 .gif 时不尝试读取（封面 CDN 不回 CORS 头、OSS 直连 403，
  *          浏览器拿不到它的字节），只给一条「本塔GIF可另存后拖入」的链接：
  *          点开新标签另存，再把 .gif 拖进黑色区域（LINK 模式不探测，那要整条拼图）
  *        · LINK：站点不接受 GIF 直传，所以只贴图；勾「另一半」时两座塔都贴
+ *        · 选帧界面里放进来的是静态图（不是 .gif）时也不退出选帧：
+ *          勾「只更换封面」→ 只把这张图裁好贴成覆盖层；不勾 → 不贴图，
+ *          直接把塔图换成这张（贴一张和塔图一样的图没有意义）。
+ *          LINK 则默认只贴图（想换静态 LINK 图在普通裁剪里就能做），勾「另一半」两座都贴，
+ *          也不用为它再加勾选框
  *        覆盖层插在塔图 canvas 与站点播放键之间：静止显示你选的帧，点播放自动隐藏、
  *        暂停恢复；每座塔各存一张（localStorage tgtk:gifcovers:v1），刷新、关弹窗都还在
  *      + 复制当前塔图到我的圣殿；修改按激进版接口 chara/temple/cover/{cid}/{uid}，
@@ -288,7 +294,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.39（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.43（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -10267,6 +10273,9 @@ html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-c
 .tgtk-crop-openlink{color:#d4568e;text-decoration:underline;cursor:pointer}
 #tgtk-crop [hidden]{display:none!important}
 .tgtk-crop-qwrap{display:flex;align-items:center;gap:8px}
+/* 「输出画质」跟行标签同一号字（原来继承 13px，比「本地图片」显大），
+   字号一样宽就一样，下拉框自然和「选择文件」左对齐 */
+.tgtk-crop-qwrap>label{flex:none;color:inherit;opacity:.75;font-size:12px;line-height:1.5}
 .tgtk-crop-gifbtn{box-sizing:border-box;height:24px;padding:0 10px;border:1px solid rgba(212,86,142,.45);
   border-radius:6px;background:transparent;color:#b07a92;cursor:pointer;
   font:600 12px/22px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
@@ -14788,7 +14797,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     /* 说明行 + GIF 信息行放同一个定高盒子里：单塔模式固定占两行，
        点「GIF封面」长出信息行时浮窗长度不变（用户 2026-11-12 要求） */
     const TIP_DEFAULT = '把图片拖进上面的黑色区域，或点「选择文件」；也可直接 Ctrl+V 粘贴截图';
-    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, TIP_DEFAULT);
+    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, link ? '' : TIP_DEFAULT);
     const infoBox = tgH(cropDoc, 'div', { class: 'tgtk-crop-info' + (link ? '' : ' tgtk-info-fixed') },
       tip, gifInfo, gifOpenRow);
 
@@ -14832,11 +14841,17 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const refreshTip = () => {
       if (link) { tip.textContent = ''; return; }   // LINK 不要说明行（用户要求），信息都在按键和帧信息里
       if (gifMode) {
+        /* 选帧界面里放进来的是一张静态图：勾了只贴图，不勾就直接换塔图 */
+        if (st.img && !st.animated) {
+          tip.textContent = gifOnly
+            ? '静态图：只在本机贴图，站点上的塔图不动'
+            : '静态图：直接更换塔图，不贴图（勾「只更换封面」才贴）';
+          return;
+        }
         if (!TGGC.count) {
-          /* LINK 不留提示行（用户要求）；单塔至少留一句怎么办，别让这行空成一条缝 */
-          tip.textContent = link ? ''
-            : (st.autoGifUrl ? '本塔封面就是 GIF：点下面链接另存后拖进来'
-              : '还没有载入 GIF：把 .gif 拖进上面的黑色区域，或点左边「选择文件」');
+          /* LINK 不留提示行（用户要求）；本塔本身就是 GIF 时也只留下面那条另存链接 */
+          tip.textContent = link || st.autoGifUrl ? ''
+            : '还没有载入 GIF：把 .gif 拖进上面的黑色区域，或点左边「选择文件」';
           return;
         }
         const how = link
@@ -14941,7 +14956,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       /* 步进键 / 帧号 / 播放预览只在选帧时出现；「GIF封面」一直都在最右边 */
       gifPrev.hidden = gifNo.hidden = gifNext.hidden = gifPlayBtn.hidden = !gifMode;
       gifInfo.hidden = !gifMode;
-      if (link) infoBox.hidden = !gifMode;      // LINK 平时不留说明行，选帧时才用这格放帧信息
+      /* LINK 的说明格一直留着（里面本来就没字）：给「本地图片」那排留出上边距，
+         和选帧时的位置一致；多的高度由下面那块留白吃掉，浮窗总长不变 */
       gifOnlyRow.hidden = !gifMode || !!link;   // LINK 不支持 GIF 直传，只能贴图
       gifPlayBtn.disabled = !TGGC.count;      // 没帧时留着位置，按不动
       gifPrev.disabled = gifNext.disabled = !TGGC.count;
@@ -14997,11 +15013,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         updateGifLabel();
         gifUI();
         gifInfo.hidden = true;
+        if (st.img) {
+          /* 手里已经是一张静态图（在选帧界面里换过文件）：不再提本塔的 GIF，
+             只说明「勾了只贴图 / 不勾直接换塔图」 */
+          gifOpenRow.hidden = true;
+          refreshTip();
+          return;
+        }
         if (st.autoGifUrl) {
-          /* 本塔本来就是 GIF：不尝试读取（读不到），只留一个另存入口 */
+          /* 本塔本来就是 GIF：不尝试读取（读不到），只留一个另存入口。
+             说明文字不要（用户 2026-11-12 要求），链接自己占第一行，下面那行留空 */
           gifOpen.href = st.autoGifUrl;
           gifOpenRow.hidden = false;
-          tip.textContent = '本塔封面就是 GIF：点下面的链接另存后拖进来';
+          tip.textContent = '';
           return;
         }
         gifOpenRow.hidden = true;
@@ -15194,11 +15218,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         dst.touched = false; // 新图进来算「没动过裁剪框」
         if (dst !== st) { resolve(true); return; } // 已经切到另一侧：静默存下即可
         range.disabled = (!!st.animated && !gifMode) || !!st.urlOnly;
-        // 已经在逐帧选封面时换文件：新 GIF 直接重新解析，换成静态图就退出选帧
+        // 已经在逐帧选封面时换文件：GIF 重新解析；换成静态图就留在选帧界面（用户要求），
+        // 只把上一份 GIF 的帧缓存清掉，免得「静态图 + 旧帧」贴错
         if (gifMode) {
           (cropDoc.defaultView || window).setTimeout(() => {
             if (!gifMode) return;
-            if (st.animated) enterGif(); else exitGif(false);
+            if (st.animated) { enterGif(); return; }
+            stopGifPlay();
+            gcClose();
+            updateGifLabel();
+            gifUI();
+            gifInfo.hidden = true;      // 静态图没有帧信息（gifUI 会按模式重新打开，所以放后面）
+            gifOpenRow.hidden = true;
+            refreshTip();
           }, 0);
         }
         if (st.animated) { draw(); refreshTip(); resolve(true); return; }
@@ -15438,6 +15470,34 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
      * 返回 true = 继续往下走提交流程；false = 已经处理完（浮层已关）
      */
     const applyGif = async () => {
+      /* 选帧界面里放进来的是静态图（不是 GIF），按用户 2026-11-13 的方案：
+         单塔：勾了「只更换封面」→ 只在本机贴图；没勾 → 不贴，直接换塔图
+               （贴一张和塔图一样的图没意义）。
+         LINK：这里进来就是为了贴图 —— 想换静态 LINK 图在普通裁剪里就能做，
+               所以默认只贴图，不上传，也不用加勾选框。 */
+      if (st.img && !st.animated) {
+        if (!link && !gifOnly) return true;         // 单塔没勾 → 走下面的换塔图
+        const im = st.img;
+        const still = {
+          bmp: im,
+          w: im.naturalWidth || im.width || 0,
+          h: im.naturalHeight || im.height || 0,
+        };
+        if (!still.w || !still.h || !st.fit || !st.box) throw new Error('这张图还没准备好，稍等再点');
+        const uid = target.uid || gcMyUid();
+        if (link) {
+          const pair = gcLinkPair(still, st.fit, st.box);
+          gcBind(target.cid, uid, pair[curHalf === 'right' ? 1 : 0]);
+          const wantOther = !!(chk.checked && partnerMine && link.linkCid);
+          if (wantOther) gcBind(link.linkCid, link.linkUid || '', pair[curHalf === 'right' ? 0 : 1]);
+          tgToast(wantOther ? '两座塔的封面都贴好了（只在本机生效）' : '本塔封面已贴好（只在本机生效）');
+        } else {
+          gcBind(target.cid, uid, gcCoverUrl(still, st.fit, st.box, 520));
+          tgToast('封面已贴好（只在本机生效，站点塔图没动）');
+        }
+        tgCropClose();
+        return false;
+      }
       if (!TGGC.count) throw new Error('GIF 还没解析好，等它转完再点');
       const fr = await gcFrame(gifIdx);
       const uid = target.uid || gcMyUid();
@@ -18774,7 +18834,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.39（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.43（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -18865,7 +18925,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.39', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.43', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
       };

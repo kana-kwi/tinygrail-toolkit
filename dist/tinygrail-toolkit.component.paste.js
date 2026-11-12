@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.39
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.43
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -8976,6 +8976,7 @@ html[data-theme="dark"] .tgtk-crop-sel{background:#2a2f3b;color:#e6e8ee;border-c
 .tgtk-crop-openlink{color:#d4568e;text-decoration:underline;cursor:pointer}
 #tgtk-crop [hidden]{display:none!important}
 .tgtk-crop-qwrap{display:flex;align-items:center;gap:8px}
+.tgtk-crop-qwrap>label{flex:none;color:inherit;opacity:.75;font-size:12px;line-height:1.5}
 .tgtk-crop-gifbtn{box-sizing:border-box;height:24px;padding:0 10px;border:1px solid rgba(212,86,142,.45);
   border-radius:6px;background:transparent;color:#b07a92;cursor:pointer;
   font:600 12px/22px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
@@ -12994,7 +12995,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const stage = tgH(cropDoc, 'div', { class: 'tgtk-crop-stage' }, cvs,
       tgH(cropDoc, 'div', { class: 'tgtk-crop-drop' }, '松开即可载入这张图片'));
     const TIP_DEFAULT = '把图片拖进上面的黑色区域，或点「选择文件」；也可直接 Ctrl+V 粘贴截图';
-    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, TIP_DEFAULT);
+    const tip = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip' }, link ? '' : TIP_DEFAULT);
     const infoBox = tgH(cropDoc, 'div', { class: 'tgtk-crop-info' + (link ? '' : ' tgtk-info-fixed') },
       tip, gifInfo, gifOpenRow);
 
@@ -13035,10 +13036,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const refreshTip = () => {
       if (link) { tip.textContent = ''; return; }   // LINK 不要说明行（用户要求），信息都在按键和帧信息里
       if (gifMode) {
+        if (st.img && !st.animated) {
+          tip.textContent = gifOnly
+            ? '静态图：只在本机贴图，站点上的塔图不动'
+            : '静态图：直接更换塔图，不贴图（勾「只更换封面」才贴）';
+          return;
+        }
         if (!TGGC.count) {
-          tip.textContent = link ? ''
-            : (st.autoGifUrl ? '本塔封面就是 GIF：点下面链接另存后拖进来'
-              : '还没有载入 GIF：把 .gif 拖进上面的黑色区域，或点左边「选择文件」');
+          tip.textContent = link || st.autoGifUrl ? ''
+            : '还没有载入 GIF：把 .gif 拖进上面的黑色区域，或点左边「选择文件」';
           return;
         }
         const how = link
@@ -13136,7 +13142,6 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const gifUI = () => {
       gifPrev.hidden = gifNo.hidden = gifNext.hidden = gifPlayBtn.hidden = !gifMode;
       gifInfo.hidden = !gifMode;
-      if (link) infoBox.hidden = !gifMode;      // LINK 平时不留说明行，选帧时才用这格放帧信息
       gifOnlyRow.hidden = !gifMode || !!link;   // LINK 不支持 GIF 直传，只能贴图
       gifPlayBtn.disabled = !TGGC.count;      // 没帧时留着位置，按不动
       gifPrev.disabled = gifNext.disabled = !TGGC.count;
@@ -13186,10 +13191,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         updateGifLabel();
         gifUI();
         gifInfo.hidden = true;
+        if (st.img) {
+          gifOpenRow.hidden = true;
+          refreshTip();
+          return;
+        }
         if (st.autoGifUrl) {
           gifOpen.href = st.autoGifUrl;
           gifOpenRow.hidden = false;
-          tip.textContent = '本塔封面就是 GIF：点下面的链接另存后拖进来';
+          tip.textContent = '';
           return;
         }
         gifOpenRow.hidden = true;
@@ -13371,7 +13381,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         if (gifMode) {
           (cropDoc.defaultView || window).setTimeout(() => {
             if (!gifMode) return;
-            if (st.animated) enterGif(); else exitGif(false);
+            if (st.animated) { enterGif(); return; }
+            stopGifPlay();
+            gcClose();
+            updateGifLabel();
+            gifUI();
+            gifInfo.hidden = true;      // 静态图没有帧信息（gifUI 会按模式重新打开，所以放后面）
+            gifOpenRow.hidden = true;
+            refreshTip();
           }, 0);
         }
         if (st.animated) { draw(); refreshTip(); resolve(true); return; }
@@ -13579,6 +13596,29 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     };
 
     const applyGif = async () => {
+      if (st.img && !st.animated) {
+        if (!link && !gifOnly) return true;         // 单塔没勾 → 走下面的换塔图
+        const im = st.img;
+        const still = {
+          bmp: im,
+          w: im.naturalWidth || im.width || 0,
+          h: im.naturalHeight || im.height || 0,
+        };
+        if (!still.w || !still.h || !st.fit || !st.box) throw new Error('这张图还没准备好，稍等再点');
+        const uid = target.uid || gcMyUid();
+        if (link) {
+          const pair = gcLinkPair(still, st.fit, st.box);
+          gcBind(target.cid, uid, pair[curHalf === 'right' ? 1 : 0]);
+          const wantOther = !!(chk.checked && partnerMine && link.linkCid);
+          if (wantOther) gcBind(link.linkCid, link.linkUid || '', pair[curHalf === 'right' ? 0 : 1]);
+          tgToast(wantOther ? '两座塔的封面都贴好了（只在本机生效）' : '本塔封面已贴好（只在本机生效）');
+        } else {
+          gcBind(target.cid, uid, gcCoverUrl(still, st.fit, st.box, 520));
+          tgToast('封面已贴好（只在本机生效，站点塔图没动）');
+        }
+        tgCropClose();
+        return false;
+      }
       if (!TGGC.count) throw new Error('GIF 还没解析好，等它转完再点');
       const fr = await gcFrame(gifIdx);
       const uid = target.uid || gcMyUid();
@@ -16594,7 +16634,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.39（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.43（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -16667,7 +16707,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.39', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.43', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
       };
