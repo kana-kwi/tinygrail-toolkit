@@ -46,6 +46,10 @@
  *      留空则按缺口自动算股数（1 股补 2 固资，奇数向上取整）
  *      献祭一律不越过塔上限：到上限就停，宁可差 1 点也不把上限撑高
  *      （上限一涨，之后每献 1 股只能换 1 固资，等于亏一半）
+ *      + 一键每日任务（标题栏闪电键）：先列出道具页的三套配置，勾哪项跑哪项，
+ *        依次复用道具页的「执行」（三种道具各按自己的次数），最后买 3 次刮刮乐；
+ *        刮刮乐每次只列**当前价格最高的三种**（总股数 / 总价在汇总行），
+ *        炮塔 / 目标 / 次数 / 自动补固资都直接读道具页的设置，不另存一份
  *      + 一键冲星：给每个角色贡献指定「数量」的星之力（1 固资 = 1 星之力），
  *        与它当前已有多少星之力无关；支持一次填多个角色，固资不够可自动献祭补充。
  *        每批自动按这座塔的固资上限切分（不用手填单次），收尾可选「补满 / 补到 250 / 不补」，
@@ -96,6 +100,20 @@
  *      + 竞拍 / 买入记净额（扣掉失败返还、撤单退款），股息按税后计
  *      + 「其他」行只显示「其他」，未识别的具体文案放到悬停提示里
  *      + 股数损失只算真正成交的卖出，献祭按消耗计，星之力转化不计入股数
+ *      + 角色归属以**描述里的 #ID** 为准：刮刮乐获奖的 RelatedId 恒为 8（会让坂上智代凭空多几千股），
+ *        「使用道具获得」的 RelatedId 是自己的炮塔（会让炮塔角色凭空多几千股）
+ *      + 股数明细有「分类（获得 / 失去）→ 类型」两级筛选：获得分竞拍 / 混沌魔方 / 虚空道标 /
+ *        刮刮乐 / ICO / 买入，失去分献祭 / 卖出 / 混沌魔方 / 虚空道标 / 星光碎片；
+ *        四个筛选挤一行，排序只有多 → 少 / 少 → 多
+ *      + 圣殿只统计固资损失（获得没有参考价值：补资、献祭都会涨，混在一起反而看不懂）
+ *      + 道标命中要分两种写法：「…损失 #A「X」97股固定资产」是打掉**圣殿固资**，只进圣殿口径；
+ *        「…损失 #A「X」49股」才是掉**活股**，只进股数口径
+ *      + 星光碎片吃掉的燃料股记燃料角色的损失（日志里 Amount 是正数，方向容易反）
+ *      + 未登录 / 会话过期时不再冒「Failed to fetch」：小圣杯会把要登录的接口 302 到
+ *        http://tinygrail.com/Account/Login…（Location 写死 http），bgm.tv 是 HTTPS 页面，
+ *        浏览器按混合内容直接把这次跳转拦掉。现在自己接管重定向（redirect:'manual'，不跟随），
+ *        判成「未登录小圣杯或会话已过期」并给一个「去小圣杯登录」入口；
+ *        浏览器禁第三方 Cookie 时也会走到这条提示 —— 账本只能读自己的日志，与有没有圣殿、持股无关
  *   8) 界面：可切换日间 / 夜间模式；面板与悬浮球都能按住随意拖动，位置记在本机，
  *      双击标题栏或点「⌖」复位；窗口优先挂到最外层页面，能拖出小圣杯区域、盖到页面左侧空白区；
  *      bgm 右下角那条工具条里多一个「工具箱」开关：点一下把胶囊收起来（免得挡页面右下角），
@@ -294,7 +312,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.43（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.53（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -495,6 +513,8 @@
     mStop: true,
     mFill: false, // 固资不足时自动献祭补充
     mFillMax: 300, // 每次自动补充时一次性献祭多少股（不再当上限用）
+    // 一键每日任务：勾了哪些（默认三种道具 + 刮刮乐全开）
+    dailyOn: { chaos: true, guidepost: true, fisheye: true, scratch: true },
     // 一键冲星（starAmount = 本次贡献多少星之力；starTarget 是旧版「目标值」，仅用于迁移）
     starChar: '',
     starAmount: 100,
@@ -515,6 +535,7 @@
     // 旧版小圣杯页面增强
     gxAuction: true, // 角色页显示拍卖底价 / 数量 / 我的出价
     gxTempleCount: true, // 角色页显示各级圣殿数量
+    gxStarPill: true, // 旧版圣殿卡右下角显示星之力（代替收益率）
     gxMyTemple: true, // 角色页高亮自己的圣殿
     gxPinMyTemple: true, // 自己的圣殿置顶
     gxTempleSize: 'm', // 圣殿尺寸 s / m / l
@@ -533,9 +554,15 @@
     logDays: 7, // 数字 = 近 N 天；'custom' = 用下面两个日期
     logFrom: '', // 自定义起始日 YYYY-MM-DD（含当天 0:00）
     logTo: '', // 自定义结束日 YYYY-MM-DD（含当天 24:00）
-    logSort: 'active',
+    logSort: 'desc', // 股数明细排序：desc 多到少 / asc 少到多
+    logDir: 'gain', // 股数明细：gain 获得 / loss 失去
+    logKind: 'all', // 股数明细再按类型筛（竞拍 / 道具 / 混沌魔方 …）
     logTop: 20,
     ledgerView: 'fund',
+    // 星之力：range = 按日志时间范围统计（每次冲星一条）；now = 不限时间，当前所有塔的星之力
+    starMode: 'range',
+    starFilter: 'all', // all / lt1w / 1w5w / 5w10w / gt10w
+    starSort: 'desc',
     // 悬浮窗位置（null = 用默认右下角）
     panelPos: null,
     fabPos: null,
@@ -595,6 +622,16 @@
     };
   }
   delete S.mTimes;
+  // 一键每日任务：旧设置里没有这一项，默认四项全开
+  {
+    const d = S.dailyOn && typeof S.dailyOn === 'object' ? S.dailyOn : {};
+    S.dailyOn = {
+      chaos: d.chaos === undefined ? true : !!d.chaos,
+      guidepost: d.guidepost === undefined ? true : !!d.guidepost,
+      fisheye: d.fisheye === undefined ? true : !!d.fisheye,
+      scratch: d.scratch === undefined ? true : !!d.scratch,
+    };
+  }
   // 筛塔：「显示全部」取消，改成「固定资产」「塔图」两个勾选。
   // 老设置的语义照搬过来：原来没勾显示全部 = 按固定资产筛；塔图选了具体的 = 勾上塔图条件。
   if (SAVED.filAssets === undefined) S.filAssets = !SAVED.showAll;
@@ -2581,6 +2618,13 @@
       pinApiDepth++;
       try {
         pending = fetch(API + path, {
+          /* 未登录时服务端会把接口 302 到 http://tinygrail.com/Account/Login…
+             （Location 写死成 http）。bgm.tv 是 HTTPS 页面，浏览器按「混合内容」把这次
+             跳转直接拦掉，fetch 只会抛一句 TypeError: Failed to fetch —— 玩家看到的
+             「统计账本错误，Failed to fetch」就是这么来的。
+             这里手动接管重定向：不跟随，拿到 opaqueredirect 就判成「未登录 / 会话过期」，
+             好给玩家一句能照做的提示（去登录 / 放行第三方 Cookie）。 */
+          redirect: 'manual',
           ...opt,
           credentials: 'include',
           signal: ctl.signal,
@@ -2594,6 +2638,13 @@
         pinApiDepth--;
       }
       const res = await pending;
+      /* redirect:'manual' 下，凡是服务端想跳转的请求都是 opaque（status 0 / type opaqueredirect）。
+         正常 JSON 接口不会走重定向，所以这一支基本等于「被踢到登录页了」。 */
+      if (res.type === 'opaqueredirect' || res.status === 0) {
+        const err = new Error('未登录小圣杯或会话已过期');
+        err.needLogin = true;
+        throw err;
+      }
       if (!res.ok) {
         if ([401, 403, 404].includes(res.status)) throw new Error('请求失败（HTTP ' + res.status + '），可能未登录小圣杯');
         throw new Error('HTTP ' + res.status);
@@ -4111,6 +4162,12 @@
     return Math.max(1, Math.min(50, Math.floor(num(by[mode]) || 1)));
   }
 
+  /** 「一键每日任务」里某项是否勾选（没存过就默认勾上） */
+  function dailyOn(mode) {
+    const map = S.dailyOn || {};
+    return map[mode] === undefined ? true : !!map[mode];
+  }
+
   /** 更新「预计消耗」提示。角色名没缓到时异步补一次，补到后重绘，
    *  让炮塔 / 目标直接手打 ID 也能显示名字（不用先去收藏夹里点一遍）。 */
   const magicNameTried = new Map(); // id → 上次补名时间；失败时限流重试，不永久放弃
@@ -4444,16 +4501,16 @@
   }
 
   async function runMagic() {
-    if (magicRunning) return;
+    if (magicRunning) return { skipped: true, text: '正在执行中' };
 
     const mode = S.magic;
     const def = MAGIC_DEFS[mode];
     const from = parseCharId(S.mFrom);
     const to = def.needTarget ? parseCharId(S.mTo) : from;
 
-    if (!from) return setMagicStatus('请填炮塔角色 ID');
-    if (def.needTarget && !to) return setMagicStatus('请填目标角色 ID');
-    if (from === to && def.needTarget) return setMagicStatus('炮塔和目标不能是同一个角色');
+    if (!from) { setMagicStatus('请填炮塔角色 ID'); return { error: '请填炮塔角色 ID' }; }
+    if (def.needTarget && !to) { setMagicStatus('请填目标角色 ID'); return { error: '请填目标角色 ID' }; }
+    if (from === to && def.needTarget) { setMagicStatus('炮塔和目标不能是同一个角色'); return { error: '炮塔和目标不能是同一个角色' }; }
 
     const times = magicTimes(mode);
     S.mTimesBy[mode] = times;
@@ -4616,6 +4673,8 @@
         const left = after[def.name];
         if (left !== undefined) pushMagicLog(h('div', { class: 'tgtk-log tgtk-log-info' }, `剩余「${def.name}」${fmt(left)} 个`));
       }
+      // 给「一键每日任务」用：把这一轮的结果交回去（UI 上照常写 mStat / mLog）
+      return { ok, fail, gain, value, stopped, text: summary };
     } finally {
       magicRunning = false;
       busy = false;
@@ -6052,6 +6111,49 @@
     return m ? num(m[1].replace(/,/g, '')) : 0;
   }
 
+  /**
+   * 真正发生股数变化的角色 —— **一律以描述里的 #ID 为准，RelatedId 只做兜底**。
+   * 真实账单（2026-11-16 用 200 条逐条核对）里 RelatedId 根本不是持股变动的人：
+   *   · 「彩票刮刮乐获奖 #69699…」的 RelatedId 恒为 8（于是坂上智代凭空多出几千股）；
+   *   · 「使用「虚空道标」获得 #6「伊吹风子」81股」的 RelatedId 是自己的炮塔；
+   *   · 「受到「虚空道标」攻击损失 #35681「惠惠」90股固定资产」的 RelatedId 是炮手。
+   * 只有「Ico / 买入 / 卖出 / 竞拍」这类 RelatedId 才是对的，但它们的描述里同样带 #ID。
+   */
+  function logCharaId(x) {
+    const byDesc = descCharaId(x.Description);
+    if (byDesc) return byDesc;
+    return x.RelatedId === undefined || x.RelatedId === null ? 0 : num(x.RelatedId);
+  }
+
+  /** 道具类日志再细分：混沌魔方 / 虚空道标 … 各自单独统计（用户要求） */
+  const ITEM_SUBS = [
+    ['chaos', '混沌魔方', /混沌魔方/],
+    ['guidepost', '虚空道标', /虚空道标/],
+    ['fisheye', '鲤鱼之眼', /鲤鱼之眼/],
+    ['shard', '星光碎片', /星光碎片/],
+    ['crystal', '闪光结晶', /闪光结晶/],
+    ['item', '其他道具', null],
+  ];
+  const ITEM_SUB_LABEL = Object.create(null);
+  ITEM_SUBS.forEach((r) => (ITEM_SUB_LABEL[r[0]] = r[1]));
+
+  function itemSub(desc) {
+    const s = String(desc || '');
+    for (let i = 0; i < ITEM_SUBS.length; i++) {
+      if (ITEM_SUBS[i][2] && ITEM_SUBS[i][2].test(s)) return ITEM_SUBS[i][0];
+    }
+    return 'item';
+  }
+
+  /**
+   * 「使用 #1「A」120股通过「星光碎片」为 #2「B」充能120股」——
+   * Amount 是正数，但消耗的是 A 的股，方向是「失去」，得单独薅出那个股数。
+   */
+  function shardFuel(desc) {
+    const m = String(desc || '').match(/使用\s*#\d+[^#]*?([\d,]+(?:\.\d+)?)\s*股/);
+    return m ? num(String(m[1]).replace(/,/g, '')) : 0;
+  }
+
   function fmtCc(v) {
     const n = num(v);
     if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + ' 亿';
@@ -6059,46 +6161,59 @@
     return n.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
   }
 
+  /**
+   * 角色维度的股数统计：一条记录只归一个方向、一个来源。
+   * gainBy / lossBy 按来源细分（道具再拆混沌魔方 / 虚空道标 …），
+   * 明细页的「获得 / 失去 → 类型」筛选直接读这两张表。
+   */
   function logStats() {
-    let income = 0;
-    let expense = 0;
-    let inN = 0;
-    let outN = 0;
     const map = new Map();
 
     logAll.forEach((x) => {
+      const ds = String(x.Description || '');
       const ch = num(x.Change);
-      if (ch > 0) {
-        income += ch;
-        inN++;
-      } else if (ch < 0) {
-        expense += -ch;
-        outN++;
-      }
-
-      let amt = x.Amount === undefined || x.Amount === null ? descAmount(x.Description) : num(x.Amount);
+      const amt = x.Amount === undefined || x.Amount === null ? descAmount(ds) : num(x.Amount);
       if (!amt) return;
 
-      let id = x.RelatedId === undefined || x.RelatedId === null ? descCharaId(x.Description) : num(x.RelatedId);
+      const id = logCharaId(x);
       if (!id) return;
 
-      const kind = classifyKind(x.Description, amt, ch, x.Type);
-      // 星之力是固资转化，不算股数；卖出只算成交的，撤单 / 冻结不算
-      if (/星之力/.test(String(x.Description || ''))) return;
+      const kind = classifyKind(ds, amt, ch, x.Type);
+      // 星之力是固资转化（1 股固定资产 → 1 星之力），不算股数
+      if (/星之力/.test(ds)) return;
+      // 「N 股固定资产」写的是圣殿固资，不是活股（道标打塔常见），归圣殿口径
+      if (/固定资产/.test(ds)) return;
+      // 卖出只算真正成交的；「卖出委托 … 冻结 N 股」Change=0，那是冻结不是损失
       if (kind === 'sell' && ch <= 0) return;
 
       let rec = map.get(id);
       if (!rec) {
-        rec = { id, gain: 0, loss: 0 };
+        rec = { id, gain: 0, loss: 0, gainBy: Object.create(null), lossBy: Object.create(null) };
         map.set(id, rec);
       }
-      // 献祭（资产重组）在日志里股数是正数，但方向是消耗，和账本口径保持一致
-      if (kind === 'sell' || kind === 'sacrifice') rec.loss += Math.abs(amt);
-      else if (amt > 0) rec.gain += amt;
-      else rec.loss += -amt;
+      const bump = (dir, key, val) => {
+        if (!(val > 0)) return;
+        const bag = dir === 'loss' ? rec.lossBy : rec.gainBy;
+        bag[key] = (bag[key] || 0) + val;
+        if (dir === 'loss') rec.loss += val;
+        else rec.gain += val;
+      };
+
+      const sub = kind === 'item' ? itemSub(ds) : kind;
+      if (kind === 'sell' || kind === 'sacrifice') {
+        // 献祭 / 资产重组在日志里股数是正数，但方向是消耗
+        bump('loss', sub, Math.abs(amt));
+      } else if (/星光碎片/.test(ds) && /充能/.test(ds)) {
+        // 燃料股被吃掉，Amount 却是正的
+        bump('loss', 'shard', shardFuel(ds) || Math.abs(amt));
+      } else if (amt > 0) {
+        bump('gain', sub, amt);
+      } else {
+        bump('loss', sub, -amt);
+      }
     });
 
-    return { income, expense, inN, outN, chars: [...map.values()] };
+    return { chars: [...map.values()] };
   }
 
   /**
@@ -6226,14 +6341,24 @@
       }
 
       const ds = String(desc || '');
-      // 自己的塔被道标打中：接口里 Change=0、Amount = -固资点数（2026-11 用真实账单核对过）。
-      // 掉的是固资不是持股，别混进「股数损失」里。
+      // 自己的塔被道标打中：Change=0、Amount = -N。两种写法在真实账单里都有：
+      //   「…损失 #7998「大道寺知世」97股固定资产」= 掉的是圣殿固资 → 只进圣殿口径
+      //   「…损失 #111328「八奈见杏菜」49股」      = 掉的是活股     → 只进股数口径
       const isGuideHit = /虚空道标/.test(ds) && !/获得/.test(ds) && /受到|被|你的圣殿/.test(ds);
+      const hitOnFixed = isGuideHit && /固定资产/.test(ds);
 
       if (/星之力/.test(ds)) {
         // 「N 股固定资产转化为星之力」算的是固资，已在圣殿口径里，不重复计入股数
       } else if (isGuideHit) {
-        // 道标命中只掉固资，股数不动
+        // 打掉固资的那条不算股数；只有「N股」才是活股
+        if (!hitOnFixed) {
+          const sh = Math.abs(num(x.Amount)) || parseFixedShares(ds);
+          if (sh) put(buckets.stockOut, STOCK_OUT_KINDS, sh);
+        }
+      } else if (/星光碎片/.test(ds) && /充能/.test(ds)) {
+        // 「使用 A「120股」通过星光碎片为 B 充能」：吃掉的是燃料角色的股，Amount 却是正的
+        const sh = shardFuel(ds) || Math.abs(amt);
+        if (sh) put(buckets.stockOut, STOCK_OUT_KINDS, sh);
       } else if (kind === 'sell') {
         // 卖出只算真正成交的（同时收到了 cc）；挂单冻结 / 取消卖出都不计
         if (ch > 0 && amt) put(buckets.stockOut, STOCK_OUT_KINDS, Math.abs(amt));
@@ -6243,8 +6368,9 @@
       } else if (amt > 0) put(buckets.stockIn, STOCK_IN_KINDS, amt);
       else if (amt < 0) put(buckets.stockOut, STOCK_OUT_KINDS, -amt);
 
-      // 固定资产：日志里没有独立字段，只能靠描述归类 + 抠数值
-      const fk = fixedKind(desc);
+      // 固定资产：日志里没有独立字段，只能靠描述归类 + 抠数值。
+      // 道标命中只有「N股固定资产」那条才算固资；「N股」是活股，已经记进股数损失，别再算一遍。
+      const fk = isGuideHit && !hitOnFixed ? null : fixedKind(desc);
       // 道标命中行的描述有两种写法：「…11股固定资产」和「…83股」（少了「固定资产」四个字），
       // 后者抠不出数值，所以这类行直接取 Amount（-N 就是掉的点数）。
       const fAmt = isGuideHit ? Math.abs(num(x.Amount)) || parseFixed(desc) : parseFixed(desc);
@@ -6430,16 +6556,126 @@
     return wrap;
   }
 
+  /**
+   * 股数明细的「获得 / 失去 → 类型」下拉项（用户指定的分类口径）。
+   * 道具不再单列一项：混沌魔方 / 虚空道标 各自就是一项，再放个「道具」只会重复。
+   */
+  const STOCK_FILTERS = {
+    gain: [
+      ['all', '全部'],
+      ['auction', '竞拍'],
+      ['chaos', '混沌魔方'],
+      ['guidepost', '虚空道标'],
+      ['scratch', '刮刮乐'],
+      ['ico', 'ICO'],
+      ['buy', '买入'],
+    ],
+    loss: [
+      ['all', '全部'],
+      ['sacrifice', '献祭'],
+      ['sell', '卖出'],
+      ['chaos', '混沌魔方'],
+      ['guidepost', '虚空道标'],
+      ['shard', '星光碎片'],
+    ],
+  };
+
+  function logCharVal(x, dir, kind) {
+    if (kind === 'all') return dir === 'loss' ? x.loss : x.gain;
+    const bag = dir === 'loss' ? x.lossBy : x.gainBy;
+    return num(bag && bag[kind]);
+  }
+
+  /* ---- 星之力：时间范围 / 当前总量 ---- */
+
+  /** 星之力的筛选档（用户指定；5~10 万这档是补上的，否则这一段会被漏掉） */
+  const STAR_FILTERS = [
+    ['all', '全部', () => true],
+    ['lt1w', '0 ~ 1 万', (v) => v > 0 && v < 10000],
+    ['1w5w', '1 万 ~ 5 万', (v) => v >= 10000 && v < 50000],
+    ['5w10w', '5 万 ~ 10 万', (v) => v >= 50000 && v < 100000],
+    ['gt10w', '> 10 万', (v) => v >= 100000],
+  ];
+  const starFilterFn = (k) => (STAR_FILTERS.filter((r) => r[0] === k)[0] || STAR_FILTERS[0])[2];
+
+  /** 按日志时间范围统计：每条「将 #A「X」N股固定资产转化为「星之力」」记 N */
+  function starRangeRows() {
+    const map = new Map();
+    logAll.forEach((x) => {
+      const ds = String(x.Description || '');
+      if (!/星之力|灌注/.test(ds)) return;
+      const id = logCharaId(x);
+      if (!id) return;
+      const amt = Math.abs(num(x.Amount)) || descAmount(ds);
+      if (!amt) return;
+      const r = map.get(id) || { id, star: 0, n: 0 };
+      r.star += amt;
+      r.n++;
+      map.set(id, r);
+    });
+    return [...map.values()];
+  }
+
+  // 「不限时间」用的当前快照（自己所有塔的 StarForces），2 分钟缓存
+  let starNowRows = null;
+  let starNowAt = 0;
+  let starNowBusy = false;
+  let starNameBusy = false; // 正在补星之力列表的角色名 / 等级，避免重绘循环
+
+  async function loadStarNow(force) {
+    if (!force && starNowRows && Date.now() - starNowAt < 120000) return starNowRows;
+    if (starNowBusy) return starNowRows || [];
+    starNowBusy = true;
+    try {
+      const u = await selfKey();
+      if (!u) throw new Error('读不到自己的用户名');
+      const out = [];
+      let page = 1;
+      let pages = 1;
+      do {
+        const v = await api(`chara/user/temple/${encodeURIComponent(u)}/${page}/100`, { timeout: 30000 });
+        const items = (v && v.Items) || [];
+        pages = num(v && v.TotalPages) || 1;
+        items.forEach((t) => {
+          const sf = num(t.StarForces);
+          const cid = num(t.CharacterId);
+          if (sf > 0 && cid) {
+            out.push({ id: cid, star: sf, n: 0, cap: num(t.Sacrifices), assets: num(t.Assets) });
+          }
+        });
+        page++;
+        if (page <= pages && page <= 40) await sleep(120);
+      } while (page <= pages && page <= 40);
+      starNowRows = out;
+      starNowAt = Date.now();
+      // 塔接口只带 CharacterName（常常是 null），名字 / 等级统一走 chara/list 补一次，
+      // 否则「当前总量」列表全是 #41849 这种 ID
+      await loadNames(out.map((r) => r.id), false, { always: true });
+      return out;
+    } finally {
+      starNowBusy = false;
+    }
+  }
+
+  /** 星之力明细的行：筛选 + 排序（多 → 少 / 少 → 多） */
+  function starRows(list) {
+    const keep = starFilterFn(S.starFilter);
+    const rows = (list || []).filter((r) => keep(r.star));
+    const asc = S.starSort === 'asc';
+    rows.sort((a, b) => (asc ? a.star - b.star : b.star - a.star));
+    return rows;
+  }
+
   function logCharRows(st) {
-    const rows = st.chars.slice();
-    const net = (x) => x.gain - x.loss;
-    if (S.logSort === 'gain') rows.sort((a, b) => b.gain - a.gain);
-    else if (S.logSort === 'loss') rows.sort((a, b) => b.loss - a.loss);
-    else if (S.logSort === 'netUp') rows.sort((a, b) => net(b) - net(a));
-    else if (S.logSort === 'netDown') rows.sort((a, b) => net(a) - net(b));
-    else rows.sort((a, b) => b.gain + b.loss - (a.gain + a.loss));
+    const dir = S.logDir === 'loss' ? 'loss' : 'gain';
+    const kind = S.logKind || 'all';
+    const val = (x) => logCharVal(x, dir, kind);
+    // 类型选了具体某一项时，只留这一项有数的角色
+    const rows = st.chars.filter((x) => val(x) > 0);
+    const asc = S.logSort === 'asc';
+    rows.sort((a, b) => (asc ? val(a) - val(b) : val(b) - val(a)));
     const top = Math.max(1, Math.floor(num(S.logTop) || 20));
-    return { rows: rows.slice(0, top), count: rows.length };
+    return { rows: rows.slice(0, top), count: rows.length, dir, kind, val };
   }
 
   async function scanLogs() {
@@ -6487,12 +6723,9 @@
 
       const nameIds = [];
       logAll.forEach((x) => {
-        const id = num(x.RelatedId);
+        // 补名字也按「描述里的角色」来：RelatedId 有时是炮塔 / 系统占位（8），补出来是错的人
+        const id = logCharaId(x);
         if (id) nameIds.push(id);
-        if (/虚空道标/.test(String(x.Description || ''))) {
-          const did = descCharaId(x.Description);
-          if (did) nameIds.push(did);
-        }
       });
       await loadNames([...new Set(nameIds)]);
       const st = ledgerStats();
@@ -6507,7 +6740,8 @@
         setLogStatus(`${logAll.length} 条日志，但接口没给出股数变化（Amount），无法统计角色`);
       }
     } catch (err) {
-      setLogStatus('出错：' + (err && err.message ? err.message : err));
+      if (err && err.needLogin) setLogStatus(err.message, 'login');
+      else setLogStatus('出错：' + (err && err.message ? err.message : err));
     } finally {
       busy = false;
       setButtonsDisabled(false);
@@ -6578,8 +6812,10 @@
   function renderLedger() {
     const st = ledgerStats();
     const cls = logStats();
-    const { rows, count } = logCharRows(cls);
-    const view = S.ledgerView === 'stock' || S.ledgerView === 'fixed' ? S.ledgerView : 'fund';
+    const stockRows = logCharRows(cls);
+    const { rows, count } = stockRows;
+    const view =
+      S.ledgerView === 'stock' || S.ledgerView === 'fixed' || S.ledgerView === 'star' ? S.ledgerView : 'fund';
     const isFund = view === 'fund';
     const isFixed = view === 'fixed';
     const mv = holdAll.reduce((s, x) => s + num(x.UserAmount) * num(x.Current), 0);
@@ -6655,7 +6891,7 @@
           ? [flowBlock('资金收入', 'cc', 'in', st.fundIn, fundNote), flowBlock('资金支出', 'cc', 'out', st.fundOut, outNote)]
           : view === 'stock'
             ? [flowBlock('股数获得', 'sh', 'in', st.stockIn), flowBlock('股数损失', 'sh', 'out', st.stockOut)]
-            : [flowBlock('固资损失', 'fx', 'out', st.fixedOut), flowBlock('固资获得', 'fx', 'in', st.fixedIn)]
+            : [flowBlock('固资损失', 'fx', 'out', st.fixedOut)]
       )
     );
 
@@ -6672,6 +6908,73 @@
     els.logList.textContent = '';
     els.logList.hidden = view === 'fund';
     els.sortWrap.hidden = view !== 'stock';
+    els.starBar.hidden = view !== 'star';
+    els.flowBox.hidden = view === 'star'; // 星之力没有四象限，换成一条汇总
+
+    /* 星之力视角：时间范围（读日志）或当前总量（读我的塔） */
+    if (view === 'star') {
+      const now = S.starMode === 'now';
+      const list = now ? starNowRows || [] : starRangeRows();
+      const rows2 = starRows(list);
+      const total = rows2.reduce((s2, r) => s2 + r.star, 0);
+      const allTotal = list.reduce((s2, r) => s2 + r.star, 0);
+      const flt = STAR_FILTERS.filter((r) => r[0] === S.starFilter)[0] || STAR_FILTERS[0];
+      els.logStat.textContent =
+        (now ? '当前所有塔的星之力' : `${logAll.length} 条记录 · ${span || ''}`) +
+        ` · ${rows2.length} 个角色` +
+        (S.starFilter === 'all' ? '' : ` · 只看「${flt[1]}」`) +
+        ` · 合计 ${fmt(total)}` +
+        (S.starFilter === 'all' ? '' : `（全部 ${fmt(allTotal)}）`);
+      if (!rows2.length) {
+        els.logList.appendChild(
+          h('div', { class: 'tgtk-empty' },
+            now
+              ? (starNowRows ? '还没有贡献过星之力的塔' : '点上面「统计方式」里的「当前总量」读取')
+              : '这段时间没有冲星记录（换「当前总量」可以看全部）')
+        );
+        return;
+      }
+      const frag2 = HDOC.createDocumentFragment();
+      // 名字 / 等级没读到的补一次（按时间范围统计时日志里也可能有没补上的角色）
+      if (!starNameBusy) {
+        const miss = [...new Set(rows2.map((r) => r.id))].filter((id) => !nameCache[String(id)]);
+        if (miss.length) {
+          starNameBusy = true;
+          loadNames(miss, false, { always: true })
+            .then(() => {
+              starNameBusy = false;
+              if (S.ledgerView === 'star') renderLedger();
+            })
+            .catch(() => {
+              starNameBusy = false;
+            });
+        }
+      }
+      rows2.forEach((x) => {
+        const name = charaName(x.id) || `#${x.id}`;
+        const lv = knownLvOf(x.id);
+        const sub =
+          (lv != null ? `Lv${lv} · ` : '') +
+          (now
+            ? `固资 ${fmt(x.assets || 0)} / 上限 ${fmt(x.cap || 0)}`
+            : `冲星 ${x.n} 次`);
+        frag2.appendChild(
+          h(
+            'div',
+            { class: 'tgtk-row' },
+            h('div', { class: 'tgtk-main' }, charaLink(x.id, name), h('span', { class: 'tgtk-sub' }, sub)),
+            h(
+              'div',
+              { class: 'tgtk-val' },
+              h('b', { class: x.star >= 10000 ? 'tgtk-starhi' : x.star > 0 ? 'tgtk-starmid' : 'tgtk-starlow' },
+                '✦ ' + fmt(x.star))
+            )
+          )
+        );
+      });
+      els.logList.appendChild(frag2);
+      return;
+    }
 
     /* 圣殿视角：谁被道标打了，一共掉了多少固资 */
     if (isFixed) {
@@ -6711,7 +7014,17 @@
     if (view !== 'stock') return;
 
     if (!rows.length) {
-      if (logAll.length) els.logList.appendChild(h('div', { class: 'tgtk-empty' }, '没有统计到角色股数变化'));
+      if (logAll.length) {
+        const list = STOCK_FILTERS[stockRows.dir];
+        const pick = list.filter((r) => r[0] === stockRows.kind)[0];
+        els.logList.appendChild(
+          h(
+            'div',
+            { class: 'tgtk-empty' },
+            stockRows.kind === 'all' ? '没有统计到角色股数变化' : `这段时间没有「${pick ? pick[1] : ''}」的股数记录`
+          )
+        );
+      }
       return;
     }
 
@@ -6719,6 +7032,8 @@
     rows.forEach((x) => {
       const name = charaName(x.id) || `#${x.id}`;
       const net = x.gain - x.loss;
+      const v = stockRows.val(x);
+      const out = stockRows.dir === 'loss';
       frag.appendChild(
         h(
           'div',
@@ -6731,9 +7046,8 @@
           ),
           h(
             'div',
-            { class: 'tgtk-val tgtk-dual' },
-            h('b', { class: 'tgtk-up', title: '获得' }, '+' + fmt(x.gain)),
-            h('span', { class: 'tgtk-down', title: '失去' }, '-' + fmt(x.loss))
+            { class: 'tgtk-val' },
+            h('b', { class: out ? 'tgtk-down' : 'tgtk-up', title: out ? '失去' : '获得' }, (out ? '-' : '+') + fmt(v))
           )
         )
       );
@@ -6744,7 +7058,8 @@
   function copyLogs() {
     if (!logAll.length) return setLogStatus('没有可复制的数据');
     const st = ledgerStats();
-    const view = S.ledgerView === 'stock' || S.ledgerView === 'fixed' ? S.ledgerView : 'fund';
+    const view =
+      S.ledgerView === 'stock' || S.ledgerView === 'fixed' || S.ledgerView === 'star' ? S.ledgerView : 'fund';
     const lines = [];
 
     if (view === 'fund') {
@@ -6771,28 +7086,37 @@
         lines.push([d, '合计', data.total, data.n].join('\t'));
         data.rows.forEach((r) => lines.push([d, r.label, r.sum, r.n].join('\t')));
       });
-      const { rows } = logCharRows(logStats());
-      lines.push('', '角色\t获得股\t失去股\t净变化');
-      rows.forEach((x) => {
-        lines.push([charaName(x.id) || '#' + x.id, x.gain, x.loss, x.gain - x.loss].join('\t'));
+      const fr = logCharRows(logStats());
+      const dirName = fr.dir === 'loss' ? '失去' : '获得';
+      const pick = STOCK_FILTERS[fr.dir].filter((r) => r[0] === fr.kind)[0];
+      lines.push('', `角色\t${dirName}股\t净变化` + (fr.kind === 'all' ? '' : `（仅 ${pick ? pick[1] : ''}）`));
+      fr.rows.forEach((x) => {
+        lines.push([charaName(x.id) || '#' + x.id, fr.val(x), x.gain - x.loss].join('\t'));
       });
+    } else if (view === 'star') {
+      const now = S.starMode === 'now';
+      const rows2 = starRows(now ? starNowRows || [] : starRangeRows());
+      lines.push(
+        now ? '星之力（当前总量）' : `星之力贡献（${logRangeLabel()}）`,
+        now ? '角色\t星之力\t固资\t上限' : '角色\t星之力\t冲星次数'
+      );
+      rows2.forEach((x) => {
+        const nm = charaName(x.id) || '#' + x.id;
+        lines.push(now ? [nm, x.star, x.assets || 0, x.cap || 0].join('\t') : [nm, x.star, x.n].join('\t'));
+      });
+      lines.push(['合计', rows2.reduce((s2, r) => s2 + r.star, 0)].join('\t'));
     } else {
-      lines.push(`圣殿固资变动（${logRangeLabel()}）`, '方向\t来源\t固资\t次数');
-      [
-        ['损失', st.fixedOut],
-        ['获得', st.fixedIn],
-      ].forEach(([d, data]) => {
-        lines.push([d, '合计', data.total, data.n].join('\t'));
-        data.rows.forEach((r) => lines.push([d, r.label, r.sum, r.n].join('\t')));
-      });
+      // 圣殿只看损失：固资获得没有参考价值（补资 / 献祭都会涨，混在一起反而看不懂）
+      lines.push(`圣殿固资损失（${logRangeLabel()}）`, '来源\t固资\t次数');
+      lines.push(['合计', st.fixedOut.total, st.fixedOut.n].join('\t'));
+      st.fixedOut.rows.forEach((r) => lines.push([r.label, r.sum, r.n].join('\t')));
       if (st.hits.length) {
         lines.push('', '被道标命中\t角色\t损失固资\t扣股\t次数');
         st.hits.forEach((x) => lines.push(['', charaName(x.id), x.sum, x.shares || 0, x.n].join('\t')));
       }
     }
 
-    copyText(lines.join('\n'), (m) => setLogStatus(m + ' ' + (lines.length - 1) + ' 行'));
-  }
+    copyText(lines.join('\n'), (m) => setLogStatus(m + ' ' + (lines.length - 1) + ' 行'));  }
 
 
   /* ------------------------------ 界面 ------------------------------ */
@@ -7461,7 +7785,7 @@
       const n = TUI.cols;
       colBtns.forEach((b) => b.classList.toggle('tgtk-on', Number(b.dataset.cols) === n));
       colStat.textContent =
-        n === 4 ? '当前：一行 4 个（小圣杯默认大小）' : `当前：一行 ${n} 个，圣殿按比例缩小、每行排满`;
+        n === 4 ? '当前：一行 4 个（小圣杯默认大小）' : `当前：一行 ${n} 个，圣殿按比例缩小每行排满`;
     };
     colBtns.forEach((b) =>
       b.addEventListener('click', () => {
@@ -7855,13 +8179,19 @@
     });
 
     const seamlessChk = h('input', { id: 'tgtk-seamless', type: 'checkbox' });
-    const seamlessStat = h('div', { class: 'tgtk-stat' }, '');
+    // 旧版圣殿卡：右下角那枚收益率胶囊换成星之力
+    const starChk = h('input', { id: 'tgtk-star-pill', type: 'checkbox' });
+    const syncStarPill = () => {
+      starChk.checked = S.gxStarPill !== false;
+    };
+    starChk.addEventListener('change', () => {
+      S.gxStarPill = !!starChk.checked;
+      persist();
+      if (!S.gxStarPill) starPillRestore();
+      syncStarPill();
+    });
     const syncSeamless = () => {
-      const on = S.seamlessLink !== false;
-      seamlessChk.checked = on;
-      seamlessStat.textContent = on
-        ? '已开启：LINK 圣殿是一整张连续的图，中间没有白线'
-        : '已关闭：恢复小圣杯原版（左右两半斜切，中间有一条白线）';
+      seamlessChk.checked = S.seamlessLink !== false;
     };
     seamlessChk.addEventListener('change', () => {
       S.seamlessLink = !!seamlessChk.checked;
@@ -7881,19 +8211,13 @@
         h('i', { class: 'tgtk-colunit' }, '个圣殿')
       ),
       colStat,
-      h(
-        'div',
-        { class: 'tgtk-note' },
-        '只影响新版小圣杯的个人页。默认 4 个；' +
-          '选 5 / 6 个时圣殿会按比例缩小，每行排满、不会留空。'
-      ),
       h('div', { class: 'tgtk-sep' }),
       h(
         'div',
-        { class: 'tgtk-line tgtk-chkline' },
-        h('label', { class: 'tgtk-chk' }, seamlessChk, ' 无缝 link 图')
+        { class: 'tgtk-line tgtk-chkline tgtk-chknear' },
+        h('label', { class: 'tgtk-chk' }, seamlessChk, ' 无缝 link 图'),
+        h('label', { class: 'tgtk-chk' }, starChk, ' 圣殿卡显示星之力')
       ),
-      seamlessStat,
       h(
         'div',
         { class: 'tgtk-note' },
@@ -7915,6 +8239,7 @@
     );
     syncCols();
     syncSeamless();
+    syncStarPill();
     setBotOpen(false);
     renderBotList();
     renderPinList();
@@ -7957,16 +8282,24 @@
       lRangeWrap.hidden = String(S.logDays) !== 'custom';
     };
     syncRange();
+    // 股数明细的筛选：分类（获得 / 失去）→ 类型（各项来源）
+    const lDir = select('tgtk-ldir', [['gain', '获得'], ['loss', '失去']], S.logDir === 'loss' ? 'loss' : 'gain');
+    const lKind = h('select', { id: 'tgtk-lkind' });
+    const syncKindOpts = () => {
+      const list = STOCK_FILTERS[S.logDir === 'loss' ? 'loss' : 'gain'];
+      lKind.textContent = '';
+      list.forEach((r) => lKind.appendChild(h('option', { value: r[0] }, r[1])));
+      if (!list.some((r) => r[0] === S.logKind)) S.logKind = 'all';
+      lKind.value = S.logKind;
+    };
+    syncKindOpts();
     const lSort = select(
       'tgtk-lsort',
       [
-        ['active', '变动总量'],
-        ['gain', '获得最多'],
-        ['loss', '失去最多'],
-        ['netUp', '净增最多'],
-        ['netDown', '净减最多'],
+        ['desc', '多 → 少'],
+        ['asc', '少 → 多'],
       ],
-      S.logSort
+      S.logSort === 'asc' ? 'asc' : 'desc'
     );
     const lTop = select(
       'tgtk-ltop',
@@ -7974,12 +8307,45 @@
         ['10', '10 个'],
         ['20', '20 个'],
         ['30', '30 个'],
+        ['50', '50 个'],
+        ['100', '100 个'],
       ],
       String(S.logTop)
     );
+    // 星之力：统计方式（时间范围 / 当前总量）+ 档位筛选 + 排序
+    const starModeSel = select(
+      'tgtk-starmode',
+      [
+        ['range', '时间范围'],
+        ['now', '当前总量'],
+      ],
+      S.starMode === 'now' ? 'now' : 'range'
+    );
+    const starFilterSel = select(
+      'tgtk-starfilter',
+      STAR_FILTERS.map((r) => [r[0], r[1]]),
+      S.starFilter || 'all'
+    );
+    const starSortSel = select(
+      'tgtk-starsort',
+      [
+        ['desc', '多 → 少'],
+        ['asc', '少 → 多'],
+      ],
+      S.starSort === 'asc' ? 'asc' : 'desc'
+    );
+    const starBar = h(
+      'div',
+      { class: 'tgtk-line tgtk-logfilter' },
+      h('span', { class: 'tgtk-label' }, '统计'),
+      starModeSel,
+      h('span', { class: 'tgtk-label' }, '筛选'),
+      starFilterSel,
+      h('span', { class: 'tgtk-label' }, '排序'),
+      starSortSel
+    );
     const lRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '统计');
-    const lCopy = h('button', { class: 'tgtk-btn', type: 'button' }, '复制');
-    const assetBox = h('div', { class: 'tgtk-asset' }, h('div', { class: 'tgtk-stat' }, '点「统计」读取资金日志，生成资产走势'));
+    const lCopy = h('button', { class: 'tgtk-btn', type: 'button' }, '复制');    const assetBox = h('div', { class: 'tgtk-asset' }, h('div', { class: 'tgtk-stat' }, '点「统计」读取资金日志，生成资产走势'));
     const flowBox = h('div', { class: 'tgtk-flow' });
     const logStat = h('div', { class: 'tgtk-stat' }, '读取自己的资金日志，按资金 / 股数 / 固资三个维度归类');
     const logList = h('div', { class: 'tgtk-list' });
@@ -7987,11 +8353,16 @@
       ['fund', '资金'],
       ['stock', '股数'],
       ['fixed', '圣殿'],
+      ['star', '星之力'],
     ].map(([k, t]) => h('button', { class: 'tgtk-segbtn', type: 'button', 'data-view': k }, t));
     const segWrap = h('div', { class: 'tgtk-seg' }, segBtns);
     const sortWrap = h(
       'div',
-      { class: 'tgtk-line' },
+      { class: 'tgtk-line tgtk-logfilter' },
+      h('span', { class: 'tgtk-label' }, '分类'),
+      lDir,
+      h('span', { class: 'tgtk-label' }, '类型'),
+      lKind,
       h('span', { class: 'tgtk-label' }, '排序'),
       lSort,
       h('span', { class: 'tgtk-label' }, '显示'),
@@ -8008,11 +8379,13 @@
       flowBox,
       logStat,
       sortWrap,
+      starBar,
       logList,
       h(
         'div',
         { class: 'tgtk-note' },
-        '按资金日志统计，来源按接口 Type 字段归类；只能统计自己的账号。' +
+        '按资金日志统计，来源按接口 Type 字段归类；只能统计自己的账号（需要登录小圣杯，' +
+          '浏览器禁止第三方 Cookie 时也会读不到）。' +
           '竞拍 / 买入记净额（扣掉返还、撤单），股息记税后，卖出只算成交的；固资数值按日志描述解析'
       )
     );
@@ -8057,12 +8430,204 @@
       h('div', { class: 'tgtk-notefoot' }, noteStat, h('span', { class: 'tgtk-spacer' }), noteCopy, noteClear)
     );
 
+    /* ---- 一键每日任务：按道具页的配置依次执行三种道具，再买 3 次刮刮乐 ---- */
+    let dailyOpen = false;
+    let dailyRunning = false;
+    let dailyStop = false;
+
+    const dailyChks = {};
+    const dailyDescs = {};
+    const dailyRows = ['chaos', 'guidepost', 'fisheye'].map((m) => {
+      const cb = h('input', { type: 'checkbox' });
+      cb.checked = dailyOn(m);
+      dailyChks[m] = cb;
+      cb.addEventListener('change', () => {
+        S.dailyOn = Object.assign({}, S.dailyOn, { [m]: cb.checked });
+        persist();
+      });
+      const desc = h('span', { class: 'tgtk-dailydesc' }, '');
+      dailyDescs[m] = desc;
+      return h('label', { class: 'tgtk-chk tgtk-dailyrow' }, cb, h('b', null, MAGIC_DEFS[m].label), desc);
+    });
+
+    const dailyScratch = h('input', { type: 'checkbox' });
+    dailyScratch.checked = dailyOn('scratch');
+    dailyScratch.addEventListener('change', () => {
+      S.dailyOn = Object.assign({}, S.dailyOn, { scratch: dailyScratch.checked });
+      persist();
+    });
+    const dailyScratchDesc = h('span', { class: 'tgtk-dailydesc' }, '买 3 次 · 每次 1000cc');
+
+    const dailyRunBtn = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '开始');
+    const dailyStopBtn = h('button', { class: 'tgtk-btn tgtk-danger', type: 'button', hidden: 'hidden' }, '停止');
+    const dailyBackBtn = h('button', { class: 'tgtk-btn', type: 'button', style: 'margin-left:auto' }, '返回道具页');
+    const dailyStat = h('div', { class: 'tgtk-stat' }, '');
+    const dailyLog = h('div', { class: 'tgtk-logbox' });
+
+    const dailyView = h(
+      'div',
+      { class: 'tgtk-view', 'data-view': 'daily', hidden: 'hidden' },
+      ...dailyRows,
+      h('label', { class: 'tgtk-chk tgtk-dailyrow' }, dailyScratch, h('b', null, '刮刮乐'), dailyScratchDesc),
+      h('div', { class: 'tgtk-line tgtk-actions' }, dailyRunBtn, dailyStopBtn, dailyBackBtn),
+      dailyStat,
+      dailyLog
+    );
+
+    const setDailyStatus = (msg) => { if (dailyStat) dailyStat.textContent = msg; };
+    const dailyLogLine = (cls, text) => {
+      dailyLog.appendChild(h('div', { class: 'tgtk-log ' + cls }, text));
+      dailyLog.scrollTop = dailyLog.scrollHeight;
+    };
+
+    const refreshDaily = () => {
+      const from = parseCharId(S.mFrom);
+      const to = parseCharId(S.mTo);
+      const fromTxt = from ? '炮塔「' + charaName(from) + '」' : '炮塔未填';
+      const toTxt = to ? '目标「' + charaName(to) + '」' : '目标未填';
+      ['chaos', 'guidepost', 'fisheye'].forEach((m) => {
+        const def = MAGIC_DEFS[m];
+        const bits = [def.needTarget ? fromTxt + ' → ' + toTxt : fromTxt, magicTimes(m) + ' 次'];
+        if (S.mFill) bits.push('固资不足自动补');
+        dailyDescs[m].textContent = bits.join(' · ');
+      });
+      dailyScratchDesc.textContent = '买 3 次 · 每次 1000cc';
+    };
+
+    const openDaily = () => {
+      dailyOpen = true;
+      refreshDaily();
+      setDailyStatus('');
+      syncTab();
+      const ids = [parseCharId(S.mFrom), parseCharId(S.mTo)].filter(Boolean);
+      // force=true：平时 busy 为 false 时 loadNames 会直接跳过，这里要主动把名字补上
+      if (ids.length) loadNames(ids, true).then(refreshDaily).catch(() => {});
+    };
+    const closeDaily = () => {
+      dailyOpen = false;
+      syncTab();
+    };
+
+    const runDaily = async () => {
+      if (dailyRunning) return;
+      if (magicRunning) return setDailyStatus('道具正在执行中，等这一轮跑完再来');
+      const picks = ['chaos', 'guidepost', 'fisheye'].filter((m) => dailyChks[m].checked);
+      const doScratch = dailyScratch.checked;
+      if (!picks.length && !doScratch) return setDailyStatus('至少勾一项再开始');
+      if (picks.length && !parseCharId(S.mFrom)) return setDailyStatus('请先在「道具」页填炮塔角色 ID');
+
+      dailyRunning = true;
+      dailyStop = false;
+      dailyLog.textContent = '';
+      dailyRunBtn.disabled = true;
+      dailyRunBtn.textContent = '执行中…';
+      dailyStopBtn.hidden = false;
+      let done = 0;
+      let bad = 0;
+
+      try {
+        for (let i = 0; i < picks.length; i++) {
+          if (dailyStop) break;
+          const mode = picks[i];
+          const def = MAGIC_DEFS[mode];
+          // 复用道具页那套执行：切到这项、同步它的次数，再点一次「执行」
+          S.magic = mode;
+          persist();
+          if (els && els.syncMagic) els.syncMagic();
+          setDailyStatus(`第 ${i + 1} / ${picks.length} 项：${def.label}…`);
+          dailyLogLine('tgtk-log-info', `▶ ${def.label} × ${magicTimes(mode)}`);
+          let r = null;
+          try {
+            r = await runMagic();
+          } catch (e) {
+            r = { error: e && e.message ? e.message : String(e) };
+          }
+          if (r && r.error) {
+            bad++;
+            dailyLogLine('tgtk-log-fail', `✗ ${def.label}：${r.error}`);
+          } else if (r && r.skipped) {
+            dailyLogLine('tgtk-log-warn', `· ${def.label}：${r.text}`);
+          } else {
+            if (r && r.fail) bad++;
+            done++;
+            dailyLogLine(r && r.fail ? 'tgtk-log-warn' : 'tgtk-log-ok', `✓ ${def.label}：${(r && r.text) || '完成'}`);
+          }
+          if (i < picks.length - 1 && !dailyStop) await sleep(1200);
+        }
+
+        if (!dailyStop && doScratch) {
+          setDailyStatus('刮刮乐 × 3…');
+          dailyLogLine('tgtk-log-info', '▶ 刮刮乐 × 3（每次 1000cc）');
+          let ok = 0;
+          let fail = 0;
+          let gain = 0;
+          let value = 0;
+          for (let i = 1; i <= 3; i++) {
+            if (dailyStop) break;
+            try {
+              const v = await api('event/scratch/bonus2', { method: 'POST', body: '{}' });
+              const items = Array.isArray(v) ? v : [];
+              const g = items.reduce((s, x) => s + num(x.Amount), 0);
+              const val = items.reduce((s, x) => s + num(x.Amount) * num(x.CurrentPrice), 0);
+              ok++;
+              gain += g;
+              value += val;
+              // 只挑当前价格最高的三种：同一次刮出来的股，单价高才是真赚到（总价在下面汇总行里）
+              const top = items
+                .slice()
+                .sort((a, b) => num(b.CurrentPrice) - num(a.CurrentPrice))
+                .slice(0, 3)
+                .map((x) => (x.Name || '#' + x.Id) + ' +' + fmt(num(x.Amount)))
+                .join('、');
+              dailyLogLine('tgtk-log-ok', `#${i} ${top || '开出 1 张'}${items.length > 3 ? ' 等' : ''}`);
+            } catch (e) {
+              fail++;
+              dailyLogLine('tgtk-log-fail', `#${i} 失败：${e && e.message ? e.message : e}`);
+            }
+            if (i < 3 && !dailyStop) await sleep(900);
+          }
+          const t = `刮刮乐 成功 ${ok} / 失败 ${fail}` + (gain ? ` · 共 ${fmt(gain)} 股` : '') + (value ? ` · 约 ₵${fmt(value)}` : '');
+          dailyLogLine('tgtk-log-sum', t);
+          if (fail) bad++;
+          done++;
+        }
+
+        setDailyStatus((dailyStop ? '已停止 · ' : '完成 · ') + `${done} 项` + (bad ? `（${bad} 项有失败）` : ''));
+      } finally {
+        dailyRunning = false;
+        dailyRunBtn.disabled = false;
+        dailyRunBtn.textContent = '开始';
+        dailyStopBtn.hidden = true;
+        refreshDaily();
+      }
+    };
+
+    dailyRunBtn.addEventListener('click', runDaily);
+    dailyStopBtn.addEventListener('click', () => {
+      dailyStop = true;
+      magicRunning = false; // 让当前这一发道具尽快收手
+      setDailyStatus('正在停止…（当前这一发会执行完）');
+    });
+    dailyBackBtn.addEventListener('click', closeDaily);
+
+    const dailyBtn = h('button', {
+      class: 'tgtk-ico',
+      type: 'button',
+      title: '一键每日任务：按道具页的配置执行三种道具 + 刮刮乐 ×3',
+    }, '');
+    dailyBtn.innerHTML =
+      '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"><path d="M8.6 1.5 3.4 8.6h3.3l-.5 5.9 5.2-7.1H8.1z"/></svg>';
+    dailyBtn.addEventListener('click', () => {
+      if (dailyOpen) closeDaily();
+      else openDaily();
+    });
+
     const titleEl = h('span', { class: 'tgtk-title' }, '小圣杯工具箱');
     const tabbar = h('div', { class: 'tgtk-tabbar' }, tabBtns);
     const bodyEl = h(
       'div',
       { class: 'tgtk-body' },
-      templeView, holdView, fantasyView, favView, magicView, icoView, coverView, logView
+      templeView, holdView, fantasyView, favView, magicView, icoView, coverView, logView, dailyView
     );
     const panel = h(
       'section',
@@ -8071,7 +8636,7 @@
         'header',
         { class: 'tgtk-head', title: '按住可拖动窗口 · 双击复位到右下角' },
         titleEl,
-        h('span', { class: 'tgtk-headtools' }, noteBtn, posBtn, themeBtn, closeBtn)
+        h('span', { class: 'tgtk-headtools' }, dailyBtn, noteBtn, posBtn, themeBtn, closeBtn)
       ),
       tabbar,
       bodyEl,
@@ -8099,6 +8664,13 @@
       noteView,
       noteText,
       noteStat,
+      // 一键每日任务
+      dailyBtn,
+      dailyView,
+      dailyRunBtn,
+      dailyStopBtn,
+      dailyStat,
+      dailyLog,
       tabbar,
       bodyEl,
       views: { temple: templeView, hold: holdView, fantasy: fantasyView, fav: favView, magic: magicView, ico: icoView, cover: coverView, log: logView },
@@ -8204,6 +8776,10 @@
       flowBox,
       segBtns,
       sortWrap,
+      starBar,
+      starModeSel,
+      starFilterSel,
+      starSortSel,
       logStat,
       logList,
     };
@@ -8215,8 +8791,9 @@
       hideFavPop();
       tabBtns.forEach((b) => b.classList.toggle('tgtk-on', b.dataset.tab === S.tab));
       Object.keys(els.views).forEach((k) => {
-        els.views[k].hidden = k !== S.tab;
+        els.views[k].hidden = dailyOpen || k !== S.tab;
       });
+      if (els.dailyView) els.dailyView.hidden = !dailyOpen;
       // 筛塔页：用户名空着就自动填自己（换页 / 清空过之后回来也会补上）
       if (S.tab === 'temple') ensureTempleUser();
       if (S.tab === 'fav') {
@@ -8242,6 +8819,7 @@
 
     tabBtns.forEach((b) =>
       b.addEventListener('click', () => {
+        dailyOpen = false; // 从每日任务切回任意标签
         S.tab = b.dataset.tab;
         persist();
         writeUI({ tab: S.tab });
@@ -8705,6 +9283,8 @@
         syncMagic();
       })
     );
+    // 一键每日任务要按道具切过去执行（复用这里的高亮 / 次数框 / 提示同步）
+    if (els) els.syncMagic = syncMagic;
 
     mFrom.addEventListener('input', () => {
       S.mFrom = mFrom.value;
@@ -8935,8 +9515,20 @@
         if (logAll.length) scanLogs();
       })
     );
+    lDir.addEventListener('change', () => {
+      S.logDir = lDir.value === 'loss' ? 'loss' : 'gain';
+      syncKindOpts(); // 两种分类的类型项不一样，换的时候要重排
+      lKind.value = S.logKind;
+      persist();
+      if (logAll.length) renderLedger();
+    });
+    lKind.addEventListener('change', () => {
+      S.logKind = lKind.value || 'all';
+      persist();
+      if (logAll.length) renderLedger();
+    });
     lSort.addEventListener('change', () => {
-      S.logSort = lSort.value;
+      S.logSort = lSort.value === 'asc' ? 'asc' : 'desc';
       persist();
       if (logAll.length) renderLedger();
     });
@@ -8945,11 +9537,40 @@
       persist();
       if (logAll.length) renderLedger();
     });
+    /** 进「星之力」视图：时间范围直接用已读到的日志；当前总量先拉一次自己的塔 */
+    const renderStar = () => {
+      if (S.starMode === 'now' && !starNowRows) {
+        els.logStat.textContent = '读取当前星之力…';
+        loadStarNow(true)
+          .then(() => renderLedger())
+          .catch((e) => {
+            els.logStat.textContent = '读星之力失败：' + (e && e.message ? e.message : e);
+          });
+        return;
+      }
+      renderLedger();
+    };
+    starModeSel.addEventListener('change', () => {
+      S.starMode = starModeSel.value === 'now' ? 'now' : 'range';
+      persist();
+      renderStar();
+    });
+    starFilterSel.addEventListener('change', () => {
+      S.starFilter = starFilterSel.value || 'all';
+      persist();
+      if (logAll.length || starNowRows) renderLedger();
+    });
+    starSortSel.addEventListener('change', () => {
+      S.starSort = starSortSel.value === 'asc' ? 'asc' : 'desc';
+      persist();
+      if (logAll.length || starNowRows) renderLedger();
+    });
     segBtns.forEach((b) =>
       b.addEventListener('click', () => {
         S.ledgerView = b.dataset.view || 'fund';
         persist();
-        if (logAll.length) renderLedger();
+        if (S.ledgerView === 'star') renderStar();
+        else if (logAll.length) renderLedger();
       })
     );
     lRun.addEventListener('click', scanLogs);
@@ -9066,6 +9687,8 @@
     DOCS.forEach((d) => d.addEventListener('keydown', onKey));
 
     sortWrap.hidden = S.ledgerView !== 'stock';
+    starBar.hidden = S.ledgerView !== 'star';
+    if (S.ledgerView === 'star' && S.starMode === 'now') renderStar();
     syncTab();
     syncSource();
     syncMagic();
@@ -17125,17 +17748,413 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     if (pill.getAttribute('aria-label') !== tip) pill.setAttribute('aria-label', tip);
   }
 
+  /* -------------------- 旧版圣殿卡：把「+38.98」那格换成星之力 --------------------
+   * 旧版个人页的塔卡右下角有一枚带符号的收益率胶囊（+38.98），站点按塔等级上色
+   *（紫 3 级 / 黄 2 级 / 灰 1 级）。这里改成显示这座塔的星之力，颜色也跟着换成
+   * 紫 ≥1 万（已冲星）/ 黄 0~1 万 / 灰 0。
+   * 不认 class：胶囊里只有一个「+数字(.数字)」的纯文本节点，位置在塔图右下半区。
+   */
+  const STAR_TIERS = [
+    { bg: 'rgba(168,85,247,.96)', bd: 'rgba(245,235,255,.95)' }, // 紫：已冲星
+    { bg: 'rgba(234,179,8,.96)', bd: 'rgba(255,246,200,.95)' }, // 黄：0 < x < 1 万
+    { bg: 'rgba(148,163,184,.96)', bd: 'rgba(255,255,255,.85)' }, // 灰：0
+  ];
+
+  const starMap = Object.create(null); // cid → 星之力（当前页面主人的塔）
+  let starOwner = '';
+  let starLoadedAt = 0;
+  let starLoading = false;
+  let starFailAt = 0; // 上次读取失败的时间：失败后别每 900ms 重打一次接口
+
+  function starOwnerName(d) {
+    try {
+      const w = d.defaultView || window;
+      const m = /\/user\/([^/?#]+)/.exec(String((w.location && w.location.pathname) || ''));
+      if (m) return decodeURIComponent(m[1]);
+    } catch (e) {}
+    // 乐园超展开（bgm.tv/rakuen）这类页面地址里没有用户名，圣杯区自己带一个 /user/xxx 链接
+    try {
+      const a = d.querySelector(
+        '#grail a[href*="/user/"], [id^="grail"] a[href*="/user/"], .grail_list a[href*="/user/"], .grailBox a[href*="/user/"]'
+      );
+      const m = a && /\/user\/([^/?#]+)/.exec(a.getAttribute('href') || '');
+      if (m) return decodeURIComponent(m[1]);
+    } catch (e) {}
+    // 最后退回自己（localStorage 里的账号 / 右上角用户面板）
+    try {
+      return guessedUsername() || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  async function starMapLoad(owner) {
+    if (!owner || starLoading) return;
+    starLoading = true;
+    const map = Object.create(null);
+    try {
+      let page = 1;
+      let pages = 1;
+      do {
+        const v = await api(`chara/user/temple/${encodeURIComponent(owner)}/${page}/100`, { timeout: 30000 });
+        const items = (v && v.Items) || [];
+        pages = num(v && v.TotalPages) || 1;
+        items.forEach((t) => {
+          const cid = num(t.CharacterId);
+          if (cid) map[cid] = num(t.StarForces);
+        });
+        page++;
+        if (page <= pages && page <= 40) await sleep(120);
+      } while (page <= pages && page <= 40);
+      for (const k in starMap) delete starMap[k];
+      for (const k in map) starMap[k] = map[k];
+      starOwner = owner;
+      starLoadedAt = Date.now();
+      starFailAt = 0;
+    } catch (e) {
+      starFailAt = Date.now();
+    } finally {
+      starLoading = false;
+    }
+  }
+
+  /* 角色页：一个角色下挂着很多人的塔，和个人页「一个人很多个角色」正好反过来，
+     按用户名拉 chara/user/temple 那套在这里对不上号。角色页改用 chara/temple/{cid}
+     （再并 chara/links/{cid} 补 LINK 塔）拉这一角色的全部圣殿，按塔主建表。 */
+  const starCharaByUid = Object.create(null);
+  const starCharaByName = Object.create(null);
+  let starCharaCid = '';
+  let starCharaAt = 0;
+  let starCharaFailAt = 0;
+  let starCharaLoading = false;
+
+  async function starCharaLoad(cid) {
+    if (!cid || starCharaLoading) return;
+    starCharaLoading = true;
+    const byUid = Object.create(null);
+    const byName = Object.create(null);
+    let ok = false;
+    try {
+      const list = await gxTempleList(cid);
+      (list || []).forEach((t) => {
+        if (!t || t.StarForces === undefined || t.StarForces === null) return;
+        ok = true;
+        const star = num(t.StarForces);
+        const uid = String(t.UserId || '');
+        // 同一塔主可能既在 temple 又在 links 里：取大的那笔，别被 0 覆盖掉
+        if (uid && !(uid in byUid && byUid[uid] >= star)) byUid[uid] = star;
+        const nm = String(t.Name || t.Username || '').toLowerCase();
+        if (nm && !(nm in byName && byName[nm] >= star)) byName[nm] = star;
+      });
+      // 接口没给 StarForces（字段改名 / 旧接口）就别硬刷 0，宁可保持原样
+      if (!ok) throw new Error('no star field');
+      for (const k in starCharaByUid) delete starCharaByUid[k];
+      for (const k in starCharaByName) delete starCharaByName[k];
+      for (const k in byUid) starCharaByUid[k] = byUid[k];
+      for (const k in byName) starCharaByName[k] = byName[k];
+      starCharaCid = String(cid);
+      starCharaAt = Date.now();
+      starCharaFailAt = 0;
+    } catch (e) {
+      starCharaFailAt = Date.now();
+    } finally {
+      starCharaLoading = false;
+    }
+  }
+
+  /** 这张卡是哪位塔主的：新版 data-user-id / data-user-name；
+   *  旧版 data-id = uid#cid；都对不上再看 .name 里的 @塔主 链接 */
+  function starOfCharaCard(card) {
+    if (!card || !card.getAttribute) return null;
+    let uid = String(card.getAttribute('data-user-id') || '');
+    const raw = String(card.getAttribute('data-id') || '');
+    if (!uid) {
+      let m = raw.match(/^(\d+)#\d+$/);
+      if (m) uid = m[1];
+      else {
+        m = raw.match(/^\d+_(\d+)$/);
+        if (m) uid = m[1];
+      }
+    }
+    if (uid && uid in starCharaByUid) return starCharaByUid[uid];
+    // 旧版卡把塔主写在 .name > a 里：href=/user/{用户名}、文本=@昵称
+    let nm = String(card.getAttribute('data-user-name') || '').toLowerCase();
+    if (!nm) {
+      try {
+        const a = card.querySelector('.name a[href*="/user/"], .title a[href*="/user/"], a[href*="/user/"]');
+        const hm = a && String(a.getAttribute('href') || '').match(/\/user\/([^/?#]+)/);
+        if (hm) nm = decodeURIComponent(hm[1]).toLowerCase();
+        if (!(nm in starCharaByName) && a) {
+          const t = String(a.textContent || '').replace(/^@/, '').trim().toLowerCase();
+          if (t) nm = t;
+        }
+      } catch (e) {}
+    }
+    if (nm && nm in starCharaByName) return starCharaByName[nm];
+    // 新版卡片右上角本来就有一枚星星（悬停显示贡献、>1 万变实心）：
+    // 接口没拉到时直接读它的 title，比整张表对号还准
+    try {
+      const badge = card.querySelector('[title*="星之力"]');
+      const ti = badge ? String(badge.getAttribute('title') || '') : '';
+      const m = ti.match(/星之力[^\d]*([\d,]+)/) || ti.match(/([\d,]+)/);
+      if (m) return num(m[1].replace(/,/g, ''));
+    } catch (e) {}
+    return null;
+  }
+
+  /** 卡片上写的角色 ID：data-id = uid#cid / cid_uid，或 data-character-id */
+  function starCardCid(card) {
+    if (!card || !card.getAttribute) return '';
+    const raw = String(card.getAttribute('data-id') || '');
+    let m = raw.match(/^\d+#(\d+)$/);
+    if (m) return m[1];
+    m = raw.match(/^(\d+)_\d+$/);
+    if (m) return m[1];
+    const v = String(card.getAttribute('data-character-id') || card.getAttribute('data-temple-character-id') || '');
+    return /^\d+$/.test(v) ? v : '';
+  }
+
+  /** 这是不是角色页：地址 /character/xxx（新版也有 #/character/xxx）。
+   *  个人页地址带 /user/，乐园超展开都不带，不能混为一谈。 */
+  function starPageIsChara(d) {
+    try {
+      const p = String((d.defaultView && d.defaultView.location && d.defaultView.location.pathname) || '');
+      if (/\/user\//.test(p)) return false;
+      if (/\/character\/|\/chara\//i.test(p)) return true;
+    } catch (e) {}
+    try {
+      // 没有 URL 可依时的判据：角色页的圣殿列表是一堆 data-id=uid#cid 的老式卡
+      if (d.querySelector('[id^="tg-trade-box-temple"] > .item')) return true;
+      // 再退一步：满页卡片写的都是同一个角色 ID，那就是角色页（个人页是很多个角色）
+      let cid = '';
+      let same = 0;
+      const cards = d.querySelectorAll('.item[data-id]');
+      for (let i = 0; i < cards.length && i < 60; i++) {
+        const c = starCardCid(cards[i]);
+        if (!c) continue;
+        if (!cid) cid = c;
+        if (c === cid) same++;
+        else return false;
+      }
+      if (cid && same >= 2) return true;
+    } catch (e) {}
+    return false;
+  }
+
+  /** 旧版圣殿卡的角色 ID：data-id 有 uid#cid 和 uid#别的 两种写法，
+   *  取能在星之力表里对上的那个；都对不上再退回塔图指纹 */
+  function starCidOf(card) {
+    const cands = [];
+    const push = (el) => {
+      const id = el && el.getAttribute ? pinCardCid(el) : '';
+      if (id && cands.indexOf(id) < 0) cands.push(id);
+    };
+    push(card);
+    if (card.querySelectorAll) {
+      card.querySelectorAll('[data-id], [data-character-id]').forEach(push);
+    }
+    for (let i = 0; i < cands.length; i++) if (cands[i] in starMap) return cands[i];
+    const byCover = pinCidByCover(pinCoverKey(pinCardCover(card)));
+    if (byCover && byCover in starMap) return byCover;
+    return cands[0] || byCover || '';
+  }
+
+  /** 胶囊里那串数字：允许带 + / ✦ 这类装饰，也允许小数和百分号。
+   *  旧版个人页是「+38.98」，角色页的卡是「+0.60」，两种都认。 */
+  const STAR_NUM_RE = /^[+\-–—✦★\s]*\d+(?:[.,]\d+)?%?$/;
+  function starNumNode(card, box) {
+    const ok = (el) => {
+      if (!el || !el.getBoundingClientRect) return null;
+      const t = String(el.textContent || '').trim();
+      if (!t || t.length > 12 || !STAR_NUM_RE.test(t)) return null;
+      const r = el.getBoundingClientRect();
+      return r.width >= 8 && r.height >= 6 ? el : null;
+    };
+    // 1) 旧版个人页：收益率就写在 .card > .buff 这一格里（这一格在左上角，纯位置判断会漏掉）
+    let hit = null;
+    try {
+      hit = card.querySelector ? card.querySelector('.card .buff') : null;
+    } catch (e) {}
+    hit = ok(hit);
+    if (hit) return hit;
+    // 2) 位置：新版卡的收益率在塔图右下角（左上角那枚 +10 之类的不碰）
+    const byPos = (root) => {
+      if (!root || !root.querySelectorAll) return null;
+      const br = root.getBoundingClientRect();
+      if (br.width < 40) return null;
+      const kids = root.querySelectorAll('*');
+      for (let i = 0; i < kids.length; i++) {
+        const k = kids[i];
+        if (k.childElementCount) continue;
+        if (k.classList && k.classList.contains('tgtk-pinpill')) continue;
+        const el = ok(k);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.left < br.left + br.width * 0.4) continue; // 只认右半
+        if (r.top < br.top + br.height * 0.35) continue; // 和下半区
+        return el;
+      }
+      return null;
+    };
+    let pos = byPos(box);
+    // 塔图那一块认错时（胶囊其实挂在卡片上）再按整张卡找一次
+    if (!pos && box !== card) pos = byPos(card);
+    if (pos) return pos;
+    // 3) 兜底：没有 .card 的卡里若还带 .buff，也认
+    try {
+      hit = card.querySelector ? card.querySelector('.buff') : null;
+    } catch (e) {}
+    return ok(hit);
+  }
+
+  function starPillPaint(card, star) {
+    const box = pinCoverBox(card) || card;
+    if (!box || !box.getBoundingClientRect) return;
+    let el = null;
+    try {
+      el = card.__tgtkStarEl || null;
+    } catch (e) {}
+    if (!el || !el.isConnected) {
+      el = starNumNode(card, box);
+      try {
+        card.__tgtkStarEl = el;
+      } catch (e) {}
+    }
+    if (!el) return;
+    const tier = star >= 10000 ? 0 : star > 0 ? 1 : 2;
+    // 记住站点原来的数字 / title，关掉开关时原样还回去
+    if (!el.hasAttribute('data-tgtk-ori')) el.setAttribute('data-tgtk-ori', String(el.textContent || ''));
+    if (!el.hasAttribute('data-tgtk-orititle')) {
+      el.setAttribute('data-tgtk-orititle', el.getAttribute('title') || '');
+    }
+    // 不带 ✦、不加千分位：胶囊宽度有限，「✦55,776」会被裁成「✦55,77」
+    const txt = String(Math.round(num(star)));
+    const changed = el.textContent !== txt;
+    if (changed) el.textContent = txt;
+    el.style.setProperty('background', STAR_TIERS[tier].bg, 'important');
+    el.style.setProperty('border-color', STAR_TIERS[tier].bd, 'important');
+    el.style.setProperty('color', '#fff', 'important');
+    el.style.setProperty('padding', '1px 5px', 'important');
+    el.style.setProperty('font-size', '10px', 'important');
+    el.style.setProperty('line-height', '1.5', 'important');
+    el.style.setProperty('white-space', 'nowrap', 'important');
+    el.style.setProperty('text-shadow', '0 1px 2px rgba(0,0,0,.35)', 'important');
+    // 站点把胶囊宽度写死了，位数一多就截断：放宽 + 给个最小宽度，
+    // 只贡献几十点的塔也不会缩成一粒小点
+    el.style.setProperty('width', 'auto', 'important');
+    el.style.setProperty('max-width', 'none', 'important');
+    el.style.setProperty('min-width', '34px', 'important');
+    el.style.setProperty('box-sizing', 'border-box', 'important');
+    el.style.setProperty('text-align', 'center', 'important');
+    el.style.setProperty('text-overflow', 'clip', 'important');
+    el.style.setProperty('overflow', 'visible', 'important');
+    // 站位也是按原来的字数算死的（左侧定位、右边贴边）：位数一多就往右溢出，
+    // 最后一位被卡片的 overflow 裁掉。压到卡片边界就改成右锚，让它向左边长。
+    if (changed || !el.style.right) {
+      try {
+        const host = box.getBoundingClientRect();
+        if (el.getBoundingClientRect().right > host.right - 1) {
+          el.style.setProperty('left', 'auto', 'important');
+          el.style.setProperty('right', '3px', 'important');
+        }
+        if (el.scrollWidth > el.clientWidth + 1) {
+          el.style.setProperty('width', 'max-content', 'important');
+        }
+      } catch (e) {}
+    }
+    const tip = `星之力 ${fmt(star)} · ${star >= 10000 ? '已冲星' : star > 0 ? '有贡献' : '未冲星'}`;
+    if (el.title !== tip) el.title = tip;
+  }
+
+  /** 关掉开关：把被换掉的收益率数字原样还回去，颜色也交回站点 */
+  function starPillRestore() {
+    for (const d of allDocs()) {
+      try {
+        d.querySelectorAll('[data-tgtk-ori]').forEach((el) => {
+          const o = el.getAttribute('data-tgtk-ori');
+          if (o == null) return;
+          el.textContent = o;
+          el.removeAttribute('data-tgtk-ori');
+          ['background', 'border-color', 'color', 'padding', 'font-size', 'line-height', 'white-space', 'text-shadow',
+            'width', 'min-width', 'max-width', 'box-sizing', 'text-align', 'text-overflow', 'overflow',
+            'left', 'right'].forEach((k) => {
+            try {
+              el.style.removeProperty(k);
+            } catch (e) {}
+          });
+          const ti = el.getAttribute('data-tgtk-orititle');
+          if (ti) el.setAttribute('title', ti);
+          else el.removeAttribute('title');
+          el.removeAttribute('data-tgtk-orititle');
+        });
+      } catch (e) {}
+    }
+    for (const k in starMap) delete starMap[k];
+    for (const k in starCharaByUid) delete starCharaByUid[k];
+    for (const k in starCharaByName) delete starCharaByName[k];
+    starCharaCid = '';
+    starCharaAt = 0;
+    starOwner = '';
+    starLoadedAt = 0;
+  }
+
   let pinDecorAt = 0;
   function pinDecorTick() {
     const now = Date.now();
     if (now - pinDecorAt < 900) return; // 站点每次重绘都会把按钮冲掉，慢一点补，别每轮都扫
     pinDecorAt = now;
     for (const d of allDocs()) {
-      // 旧版个人页：圣殿 tab 里的 .temple_list
+      const charaPage = S.gxStarPill ? starPageIsChara(d) : false;
+      // 角色页：同一个角色下挂着很多塔主，星之力只能按塔主对号 ——
+      // 个人页那套「按用户名拉他的全部塔」在这里会挂到错误的人身上，单独走一份数据。
       try {
-        d.querySelectorAll('#grail .temple_list .item').forEach((card) => {
-          const cid = pinCardCid(card) || pinCidByCover(pinCoverKey(pinCardCover(card)));
+        if (charaPage) {
+          const ccid = currentCharacterId();
+          if (
+            ccid &&
+            (starCharaCid !== ccid || Date.now() - starCharaAt > 300000) &&
+            Date.now() - starCharaFailAt > 30000
+          ) {
+            starCharaLoad(ccid);
+          }
+          const cards = [];
+          // 角色页的圣殿列表也是老式卡（.item[data-id=uid#cid] > .card > .buff），
+          // 只是外层容器不一定叫 .grail_list —— 干脆按卡本身认，再用下面的 cid 过一遍
+          [
+            '.item[data-id]',
+            '[id^="tg-trade-box-temple"] > .item',
+            '.grail_list > .item',
+          ].forEach((sel) => {
+            try {
+              d.querySelectorAll(sel).forEach((c) => {
+                if (cards.indexOf(c) < 0) cards.push(c);
+              });
+            } catch (e) {}
+          });
+          cards.forEach((card) => {
+            // 列表里混进别的角色（侧栏 / 推荐位）就别用这个角色的星之力去对号
+            const cid = starCardCid(card);
+            if (cid && ccid && cid !== String(ccid)) return;
+            const star = starOfCharaCard(card);
+            if (star !== null) starPillPaint(card, star);
+          });
+        }
+      } catch (e) {}
+      // 旧版个人页：圣殿 tab 的列表（站点用 ul.grail_list，早先的模板叫 temple_list，两种都认）
+      try {
+        const owner = S.gxStarPill && !charaPage ? starOwnerName(d) : '';
+        if (
+          owner &&
+          (starOwner !== owner || Date.now() - starLoadedAt > 300000) &&
+          Date.now() - starFailAt > 30000
+        ) {
+          starMapLoad(owner);
+        }
+        d.querySelectorAll('#grail .grail_list .item, #grail .temple_list .item').forEach((card) => {
+          const cid = starCidOf(card);
           if (cid) pinPillFor(card, cid);
+          // 塔卡里那枚收益率（.buff）改成星之力（只在本机显示，不动站点数据）
+          if (cid && S.gxStarPill && owner && cid in starMap) starPillPaint(card, starMap[cid]);
         });
       } catch (e) {}
       // 新版个人页：头像弹窗里的圣殿网格（和 4/5/6 列用的是同一个判定）
@@ -17932,8 +18951,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function setMagicStatus(msg) {
     if (els) els.mStat.textContent = msg;
   }
-  function setLogStatus(msg) {
-    if (els) els.logStat.textContent = msg;
+  function setLogStatus(msg, action) {
+    if (!els) return;
+    els.logStat.textContent = msg;
+    /* 未登录时给一个能直接点的入口；悬停说明第三方 Cookie 这个坑：
+       Chrome 拦了第三方 Cookie 的话，就算在 tinygrail.com 登录过，这边也读不到。 */
+    if (action === 'login') {
+      els.logStat.appendChild(document.createTextNode(' · '));
+      els.logStat.appendChild(h('a', {
+        class: 'tgtk-loginlink',
+        href: 'https://tinygrail.com/',
+        target: '_blank',
+        rel: 'noopener',
+        title: '在新标签打开小圣杯确认已登录；若已登录仍失败，请在浏览器里允许第三方 Cookie 后重试',
+      }, '去小圣杯登录 →'));
+    }
   }
 
   function setButtonsDisabled(v) {
@@ -18291,6 +19323,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-view{display:flex;flex-direction:column;gap:9px}
 .tgtk-view[hidden]{display:none}
 .tgtk-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+/* 账本明细的四个筛选挤在一行：不换行，下拉自己缩，标签不压缩 */
+#tgtk-panel .tgtk-logfilter{flex-wrap:nowrap;gap:6px}
+#tgtk-panel .tgtk-logfilter .tgtk-label{flex:none;font-size:12px}
+#tgtk-panel .tgtk-logfilter select{flex:1 1 auto;min-width:0;max-width:none;font-size:12px;padding:2px 4px}
 .tgtk-label{color:var(--tg-dim);font-size:12px;white-space:nowrap}
 .tgtk-dash{color:var(--tg-mute)}
 #tgtk-panel input[type=text],#tgtk-panel input[type=search],#tgtk-panel input[type=number],#tgtk-panel select,#tgtk-panel textarea{
@@ -18324,6 +19360,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-primary{background:var(--tg-accent);border-color:var(--tg-accent);color:#fff;font-weight:600}
 .tgtk-primary:disabled{opacity:.55;cursor:default}
 .tgtk-chk{display:flex;align-items:center;gap:4px;color:var(--tg-dim);font-size:12px;cursor:pointer}
+/* 一键每日任务：一行一项，勾选框 + 名称 + 灰色配置摘要 */
+.tgtk-dailyrow{width:100%;gap:8px}
+.tgtk-dailyrow b{flex:none;min-width:52px;font-weight:600;color:var(--tg-fg)}
+.tgtk-dailydesc{flex:1;min-width:0;color:var(--tg-dim);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tgtk-subtab.tgtk-off{opacity:.45;cursor:not-allowed}
 /* 「导入小圣杯收藏」的粘贴兜底区 */
 .tgtk-importbox{display:flex;flex-direction:column;gap:6px;padding:7px 8px;
@@ -18333,6 +19373,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-importbox .tgtk-actions{margin:0}
 .tgtk-chk input[type=checkbox]{width:13px;height:13px;accent-color:var(--tg-accent);cursor:pointer;margin:0}
 .tgtk-chkline{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+/* 两个勾选框并排靠左（不用 space-between 把后一个推到面板最右边） */
+.tgtk-chkline.tgtk-chknear{justify-content:flex-start;gap:18px}
 .tgtk-inline{display:flex;align-items:center;gap:4px;color:var(--tg-mute);font-size:11px}
 .tgtk-inline[hidden]{display:none}
 .tgtk-inline input[type="date"]{font:inherit;color:var(--tg-text);background:var(--tg-sunken);
@@ -18343,6 +19385,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-inline input{width:62px;background:var(--tg-sunken2);border:1px solid var(--tg-line);color:var(--tg-fg);border-radius:5px;padding:3px 5px;font-size:12px;text-align:center;outline:none}
 .tgtk-inline input:focus{border-color:var(--tg-accent)}
 .tgtk-stat{color:var(--tg-dim);font-size:12px;min-height:18px}
+.tgtk-stat .tgtk-loginlink{color:var(--tg-link);text-decoration:underline;text-underline-offset:2px;white-space:nowrap}
 .tgtk-list{display:flex;flex-direction:column;gap:2px}
 .tgtk-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 8px;border-radius:6px;
   background:var(--tg-surface)}
@@ -18374,6 +19417,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 .tgtk-sumcell span{color:var(--tg-mute);font-size:10px}
 .tgtk-up{color:var(--tg-up)}
 .tgtk-down{color:var(--tg-down)}
+/* 星之力数值：≥1 万紫 / 有值黄 / 0 灰（和旧版圣殿卡上的三个档一致） */
+.tgtk-starhi{color:#c084fc}
+.tgtk-starmid{color:#e0a82e}
+.tgtk-starlow{color:var(--tg-dim)}
 .tgtk-dual{display:flex;gap:8px;justify-content:flex-end;min-width:104px}
 .tgtk-dual b{color:var(--tg-up);font-weight:600}
 .tgtk-dual span{color:var(--tg-down)}
@@ -18834,7 +19881,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.43（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.53（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -18925,9 +19972,29 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.43', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.53', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
+        // 旧版圣殿卡的星之力胶囊：离线测「找 .buff → 换数字 / 换色 / 还原」
+        starPillPaint, starPillRestore,
+        starOwnerName: (d) => starOwnerName(d || document),
+        // 角色页那条线：灌塔主表 → 用卡片上的 data-user-id / data-user-name 对号
+        starOfCharaCard,
+        starCardCid,
+        starPageIsChara: (d) => starPageIsChara(d || document),
+        starNumNode: (card, box) => starNumNode(card, box || pinCoverBox(card) || card),
+        starCharaSeed: (rows) => {
+          for (const k in starCharaByUid) delete starCharaByUid[k];
+          for (const k in starCharaByName) delete starCharaByName[k];
+          (rows || []).forEach((r) => {
+            if (!r) return;
+            if (r.uid) starCharaByUid[String(r.uid)] = num(r.star);
+            if (r.name) starCharaByName[String(r.name).toLowerCase()] = num(r.star);
+          });
+          starCharaCid = 'test';
+          starCharaAt = Date.now();
+          starCharaFailAt = 0;
+        },
       };
     }
   } catch (e) {}
