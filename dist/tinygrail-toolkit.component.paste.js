@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.53
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.90
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -115,6 +115,7 @@
     filAssets: true,
     filCover: false,
     cover: 'default',
+    onlyMine: false,
     holdQuery: '',
     lvMin: '',
     lvMax: '',
@@ -333,6 +334,25 @@
   let favNameLoading = false;
   const favNameTried = new Set();
   const nameCache = Object.create(null);
+  const LS_NAMES = 'tgtk:names:v1';
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_NAMES) || 'null');
+    if (o && typeof o === 'object') {
+      Object.keys(o).forEach((k) => {
+        if (/^\d+$/.test(k) && o[k] && typeof o[k] === 'string') nameCache[k] = o[k];
+      });
+    }
+  } catch (e) {}
+  let nameSaveTimer = 0;
+  function nameCacheSave() {
+    if (nameSaveTimer) return;
+    nameSaveTimer = setTimeout(() => {
+      nameSaveTimer = 0;
+      try {
+        localStorage.setItem(LS_NAMES, JSON.stringify(nameCache));
+      } catch (e) {}
+    }, 1500);
+  }
   const totalCache = Object.create(null); // 角色ID -> 总股本（等级进度用）
   const metaTried = new Set(); // 已尝试拉过 meta 的角色ID，避免反复请求
   let snaps = []; // 每日资产快照 [{d:'YYYY-MM-DD', cc, mv}]
@@ -1854,6 +1874,7 @@
     hideCharaSuggest();
     favPopBtn = btn;
     const multi = !!(opts && opts.multi);
+    const onPick = opts && typeof opts.onPick === 'function' ? opts.onPick : null;
     const pop = h('div', { class: 'tgtk-favpop', 'data-theme': S.theme === 'light' ? 'light' : 'dark' });
     favPop = pop;
 
@@ -1870,11 +1891,15 @@
     fillFolderSel();
     const search = h('input', { type: 'text', autocomplete: 'off', placeholder: '搜收藏的角色名 / ID' });
     const list = h('div', { class: 'tgtk-favpoplist' });
-    const footTxt = h('span', null, multi ? '可连续点多个角色（点一下追加一个）' : '点一下填入左侧输入框');
+    const footTxt = h(
+      'span',
+      null,
+      onPick ? '点一下直接加入，可连续点' : multi ? '可连续点多个角色（点一下追加一个）' : '点一下填入左侧输入框'
+    );
     const foot = h('div', { class: 'tgtk-favfoot' }, footTxt, done);
 
     const chosen = new Set(
-      multi
+      multi && !onPick
         ? String(inp.value || '')
             .trim()
             .split(/[\s,，、]+/)
@@ -1929,6 +1954,18 @@
             );
             row.addEventListener('mousedown', (e) => e.preventDefault());
             row.addEventListener('click', () => {
+              if (onPick) {
+                const after = (ok) => {
+                  if (ok === false) return;
+                  chosen.add(x.id);
+                  footTxt.textContent = `已选 ${chosen.size} 个，可继续点`;
+                  render();
+                };
+                const r = onPick(x.id, x);
+                if (r && typeof r.then === 'function') r.then(after).catch(() => {});
+                else after(r);
+                return;
+              }
               applyFavPick(inp, x.id, multi);
               if (!multi) {
                 hideFavPop();
@@ -1978,8 +2015,8 @@
     } catch (e) {}
   }
 
-  function favBtn() {
-    return h('button', { class: 'tgtk-favbtn', type: 'button', title: '从收藏夹选角色' }, '★');
+  function favBtn(title) {
+    return h('button', { class: 'tgtk-favbtn', type: 'button', title: title || '从收藏夹选角色' }, '★');
   }
 
   function clearBtn(inp, title) {
@@ -2106,7 +2143,17 @@
     return true;
   }
 
+  let curCidAt = 0;
+  let curCidVal = '';
   function currentCharacterId() {
+    const __now = Date.now();
+    if (curCidVal && __now - curCidAt < 250) return curCidVal;
+    const __v = currentCharacterIdSlow();
+    curCidAt = __now;
+    curCidVal = __v ? String(__v) : '';
+    return __v;
+  }
+  function currentCharacterIdSlow() {
     for (const d of allDocs()) {
       let modals = [];
       try {
@@ -2237,6 +2284,7 @@
         });
         (arr || []).forEach((c) => {
           nameCache[String(c.Id)] = c.Name;
+          nameCacheSave();
           if (c.Total !== undefined && c.Total !== null) totalCache[c.Id] = num(c.Total);
           if (c.Level != null) charaLvCache[String(c.Id)] = num(c.Level);
         });
@@ -2310,15 +2358,65 @@
   const TEMPLE_MIN_CAP = 500;
   const templeBuilt = (t) => !!t && num(t.Sacrifices) >= TEMPLE_MIN_CAP;
   let templeExcluded = 0; // 本轮扫描里被排除的未建成塔数量
+  let templeExcludedMine = 0; // 其中属于我的（勾「只筛自己圣殿」时用它，别把别人的算进来）
 
   function dedupe(list) {
     const seen = new Set();
     return list.filter((t) => {
-      if (!t || seen.has(t.Id)) return false;
-      seen.add(t.Id);
+      if (!t) return false;
+      const k = String(t.Id || (String(t.CharacterId) + '|' + String(t.UserId)));
+      if (seen.has(k)) return false;
+      seen.add(k);
       return true;
     });
   }
+
+  const mineKeys = { names: [], uid: '', at: 0, asked: 0 };
+  let mineLoadFailed = false; // 「我的塔」没读到：统计行要提示，别让玩家以为塔不见了
+  async function loadMineKeys(force) {
+    if (!force && mineKeys.at && Date.now() - mineKeys.at < 600000) return mineKeys;
+    const add = (x) => {
+      const s = String(x || '').trim().toLowerCase();
+      if (s && !mineKeys.names.includes(s)) mineKeys.names.push(s);
+    };
+    add(selfKeyCache);
+    add(guessedUsername());
+    try {
+      const o = JSON.parse(HWIN.localStorage.getItem('tinygrail:user-assets') || '0') || {};
+      if (o && typeof o === 'object') {
+        mineKeys.uid = mineKeys.uid || String(o.Id || o.id || '');
+        add(o.Name || o.name);
+        add(o.Nickname || o.nickname);
+      }
+    } catch (e) {}
+    if (TGT.me && TGT.me.id) {
+      mineKeys.uid = mineKeys.uid || String(TGT.me.id);
+      add(TGT.me.name);
+    }
+    if ((!mineKeys.names.length || !mineKeys.uid) && Date.now() - mineKeys.asked > 30000) {
+      mineKeys.asked = Date.now();
+      try {
+        const v = await api('chara/user/assets/0/true');
+        if (v) {
+          mineKeys.uid = String(v.Id || v.id || mineKeys.uid || '');
+          add(v.Name || v.name);
+          add(v.Nickname || v.nickname);
+        }
+      } catch (e) {}
+    }
+    if (mineKeys.names.length || mineKeys.uid) mineKeys.at = Date.now();
+    return mineKeys;
+  }
+  const templeIsMine = (t) => {
+    if (!t) return false;
+    if (t.__mine) return true;
+    if (mineKeys.uid && String(t.UserId || '') === mineKeys.uid) return true;
+    const nm = String(t.Name || '').trim().toLowerCase();
+    if (nm && mineKeys.names.includes(nm)) return true;
+    const nk = String(t.Nickname || '').trim().toLowerCase();
+    return !!(nk && mineKeys.names.includes(nk));
+  };
+  const templeUseMine = () => S.source === 'chars' && !!S.onlyMine;
 
   function coverInfo(t) {
     const c = String(t.Cover || '').trim();
@@ -2327,12 +2425,89 @@
     return { isDefault: false, cover: c };
   }
 
+  async function templeListWithLinks(cid) {
+    const out = [];
+    const seen = Object.create(null);
+    const push = (t) => {
+      if (!t) return;
+      const k = String(t.Id || (String(t.CharacterId) + '|' + String(t.UserId)));
+      if (seen[k]) return;
+      seen[k] = 1;
+      out.push(t.CharacterId ? t : Object.assign({}, t, { CharacterId: cid }));
+    };
+    const main = await api('chara/temple/' + cid);
+    (Array.isArray(main) ? main : (main && main.Items) || []).forEach(push);
+    try {
+      const lk = await api('chara/links/' + cid);
+      (Array.isArray(lk) ? lk : (lk && lk.Items) || []).forEach(push);
+    } catch (e) {}
+    return out;
+  }
+
+  async function mineTemplesByCid(cids) {
+    const out = new Map();
+    const want = new Set((cids || []).map((x) => String(x)));
+    let all = null;
+    try { all = await pinAllLoad(); } catch (e) { all = null; }
+    if (!all) { mineLoadFailed = true; return out; }
+    if (!all.length) return out;
+    const meName = String(selfKeyCache || guessedUsername() || '');
+    const meId = String((TGT.me && TGT.me.id) || '');
+    all.forEach((t) => {
+      if (!t) return;
+      const cid = String(t.CharacterId || '');
+      if (!cid || (want.size && !want.has(cid))) return;
+      const one = Object.assign({}, t, {
+        __mine: true,
+        UserId: t.UserId || meId,
+        Name: meName || '我',
+        Nickname: meName || '我',
+      });
+      if (!out.has(cid)) out.set(cid, []);
+      out.get(cid).push(one);
+    });
+    return out;
+  }
+
   async function collectTemples() {
+    const targets = [];
+    let curId = '';
     if (S.source === 'current') {
-      const id = currentCharacterId();
-      if (!id) throw new Error('没检测到当前角色，请打开角色页，或换用「我的塔 / 角色列表」');
-      setTempleStatus('读取角色 #' + id + ' 的塔…');
-      return await api('chara/temple/' + id);
+      curId = currentCharacterId();
+      if (!curId) throw new Error('没检测到当前角色，请打开角色页，或换用「我的塔 / 角色列表」');
+      targets.push(String(curId));
+    } else if (S.source === 'chars') {
+      (S.chars || '')
+        .split(/[\s,，、]+/)
+        .map((x) => x.trim())
+        .filter((x) => /^\d+$/.test(x))
+        .forEach((x) => targets.push(x));
+      if (!targets.length) throw new Error('请填写至少一个角色 ID');
+    }
+
+    let mineMap = null;
+    if (targets.length) {
+      setTempleStatus('读取我的圣殿（补上站点隐藏的损坏塔）…');
+      mineMap = await mineTemplesByCid(targets);
+    }
+    const withMine = (cid, arr) => {
+      const list = (arr || []).slice();
+      const mine = mineMap ? mineMap.get(String(cid)) || [] : [];
+      mine.forEach((t) => {
+        const dup = list.some(
+          (x) =>
+            String(x.CharacterId || '') === String(t.CharacterId || '') &&
+            String(x.UserId || '') !== '' &&
+            String(x.UserId) === String(t.UserId)
+        );
+        if (!dup) list.push(t);
+      });
+      return list;
+    };
+
+    if (S.source === 'current') {
+      setTempleStatus('读取角色 #' + curId + ' 的塔…');
+      return withMine(curId, await templeListWithLinks(curId));
     }
 
     if (S.source === 'user') {
@@ -2366,18 +2541,13 @@
       return out;
     }
 
-    const ids = (S.chars || '')
-      .split(/[\s,，、]+/)
-      .map((x) => x.trim())
-      .filter((x) => /^\d+$/.test(x));
-    if (!ids.length) throw new Error('请填写至少一个角色 ID');
-
+    const ids = targets;
     const out = [];
     for (let i = 0; i < ids.length; i++) {
       if (!busy) break;
       setTempleStatus(`扫描角色 ${i + 1} / ${ids.length}（#${ids[i]}）…`);
       try {
-        const arr = await api('chara/temple/' + ids[i]);
+        const arr = await withMine(ids[i], await templeListWithLinks(ids[i]));
         if (Array.isArray(arr)) out.push(...arr);
       } catch (e) {}
       await sleep(180);
@@ -2391,6 +2561,8 @@
     setButtonsDisabled(true);
     templeAll = [];
     templeExcluded = 0;
+    templeExcludedMine = 0;
+    mineLoadFailed = false;
     templeNameTried = Object.create(null);
     els.templeList.textContent = '';
     try {
@@ -2398,10 +2570,17 @@
       const all = dedupe(Array.isArray(data) ? data : []);
       templeAll = all.filter(templeBuilt);
       templeExcluded = all.length - templeAll.length;
+      if (templeUseMine()) setTempleStatus('正在确认你的账号…');
+      await loadMineKeys();
+      if (templeUseMine()) {
+        templeExcludedMine = all.filter((t) => !templeBuilt(t) && templeIsMine(t)).length;
+      }
       renderTemples();
+      templeScanSave();
       if (!templeAll.length) {
-        setTempleStatus(templeExcluded
-          ? `只找到 ${fmt(templeExcluded)} 座未建成塔（上限 < ${TEMPLE_MIN_CAP}），已全部排除`
+        const exc = templeUseMine() ? templeExcludedMine : templeExcluded;
+        setTempleStatus(exc
+          ? `只找到 ${fmt(exc)} 座未建成塔（上限 < ${TEMPLE_MIN_CAP}），已全部排除`
           : '没有读到塔（该角色可能还没有人建塔）');
       }
     } catch (err) {
@@ -2415,11 +2594,13 @@
   const templeUseAssets = () => S.filAssets !== false;
   const templeUseCover = () => !!S.filCover;
 
-  function templeRows() {
+  const templePool = () => (templeUseMine() ? templeAll.filter(templeIsMine) : templeAll);
+
+  function templeRows(poolArg) {
     const key = S.field;
     const useA = templeUseAssets();
     const useC = templeUseCover();
-    const rows = templeAll.filter((t) => {
+    const rows = (poolArg || templePool()).filter((t) => {
       if (!templeBuilt(t)) return false; // 硬前提：兜一层，别让别处塞进来的未建成塔混进结果
       if (useA && !(num(t[key]) < num(S.threshold))) return false;
       if (useC) {
@@ -2435,30 +2616,452 @@
   const TEMPLE_RENDER_MAX = 300;
   let templeNameTried = Object.create(null);
 
+  const LS_TSCAN = 'tgtk:templescan:v1';
+  const TSCAN_TTL = 30 * 60 * 1000;
+  function templeScanSave() {
+    if (!templeAll.length) return;
+    try {
+      const items = templeAll.map((t) => ({
+        Id: t.Id,
+        CharacterId: t.CharacterId,
+        CharacterName: t.CharacterName,
+        UserId: t.UserId,
+        Name: t.Name,
+        Nickname: t.Nickname,
+        Assets: t.Assets,
+        Sacrifices: t.Sacrifices,
+        Level: t.Level,
+        Cover: t.Cover,
+        CharacterLevel: t.CharacterLevel,
+        LinkId: t.LinkId,
+        m: t.__mine ? 1 : 0,
+      }));
+      localStorage.setItem(
+        LS_TSCAN,
+        JSON.stringify({
+          at: Date.now(),
+          source: S.source,
+          chars: S.chars,
+          username: S.username,
+          items,
+          excluded: templeExcluded,
+        })
+      );
+    } catch (e) {}
+  }
+  function templeScanRestore() {
+    let o = null;
+    try {
+      o = JSON.parse(localStorage.getItem(LS_TSCAN) || 'null');
+    } catch (e) {
+      return false;
+    }
+    if (!o || !Array.isArray(o.items) || !o.items.length) return false;
+    if (Date.now() - num(o.at) > TSCAN_TTL) return false;
+    if (String(o.source) !== String(S.source)) return false;
+    if (String(o.chars || '') !== String(S.chars || '')) return false;
+    if (String(o.username || '') !== String(S.username || '')) return false;
+    const out = [];
+    o.items.forEach((t) => {
+      if (!t || !t.CharacterId) return;
+      if (t.m) t.__mine = true;
+      out.push(t);
+    });
+    if (!out.length) return false;
+    templeAll = out;
+    templeExcluded = num(o.excluded);
+    return true;
+  }
+
+  function locatePinIcon() {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = HDOC.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '13');
+    svg.setAttribute('height', '13');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2.2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    const p = HDOC.createElementNS(ns, 'path');
+    p.setAttribute('d', 'M12 21.6s7-6.4 7-11.3A7 7 0 0 0 5 10.3c0 4.9 7 11.3 7 11.3z');
+    svg.appendChild(p);
+    const c = HDOC.createElementNS(ns, 'circle');
+    c.setAttribute('cx', '12');
+    c.setAttribute('cy', '10');
+    c.setAttribute('r', '2.5');
+    c.setAttribute('fill', 'currentColor');
+    c.setAttribute('stroke', 'none');
+    svg.appendChild(c);
+    return svg;
+  }
+
+  function locateGo(cid) {
+    const id = String(cid || '');
+    if (!/^\d+$/.test(id)) return;
+    locatePending = { cid: '', at: 0 };
+    const nm = pinNameGet(id) || nameCache[id] || charaName(id) || '#' + id;
+    setTempleStatus('正在定位 ' + nm + '…');
+    locateRun(id, nm).catch((e) => setTempleStatus('定位失败：' + (e && e.message ? e.message : e)));
+  }
+
+  function locatePageSize() {
+    let best = 0;
+    try {
+      for (const p in pinPages) {
+        const rec = pinPages[p];
+        const n = rec && rec.items ? rec.items.length : 0;
+        if (n > best && n < 200) best = n;
+      }
+    } catch (e) {}
+    return best || 24;
+  }
+
+  function locatePagerOf(grid) {
+    try {
+      let box = grid && grid.parentElement;
+      for (let i = 0; i < 3 && box; i++, box = box.parentElement) {
+        const pager = box.querySelector('#tg-pagination');
+        if (pager) return pager;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  async function locateGotoPage(n) {
+    for (let round = 0; round < 5; round++) {
+      const grid = locateGridAny();
+      const pager = locatePagerOf(grid);
+      if (!pager) return false;
+      const btns = Array.prototype.slice.call(pager.querySelectorAll('button'));
+      let hit = null;
+      let last = null;
+      for (const b of btns) {
+        const t = String(b.textContent || '').trim();
+        if (t === String(n)) { hit = b; break; }
+        if (/^\d+$/.test(t)) last = b;
+      }
+      if (hit) {
+        if (hit.disabled) return true; // 已经在这一页
+        try { hit.click(); } catch (e) { return false; }
+        await sleep(750);
+        return true;
+      }
+      if (!last) return false;
+      try { last.click(); } catch (e) { return false; }
+      await sleep(750);
+    }
+    return false;
+  }
+
+  function locateTempleTab() {
+    for (const d of allDocs()) {
+      let tabs = [];
+      try { tabs = d.querySelectorAll('[role="tab"]'); } catch (e) { continue; }
+      for (const t of tabs) {
+        if (/座圣殿/.test(String(t.textContent || ''))) return t;
+      }
+    }
+    return null;
+  }
+
+  async function locateEnsureTempleTab() {
+    if (locateGridAny()) return true;
+    const tab = locateTempleTab();
+    if (!tab) return false;
+    try { tab.click(); } catch (e) { return false; }
+    for (let i = 0; i < 6; i++) {
+      await sleep(350);
+      if (locateGridAny()) return true;
+    }
+    return false;
+  }
+
+  function locateKickReload(page) {
+    const grid = locateGridAny();
+    if (!grid) return false;
+    let pager = null;
+    try { pager = locatePagerOf(grid); } catch (e) {}
+    if (!pager) return false;
+    const want = String(page || 1);
+    const input = pager.querySelector('input[type="number"], input[type="text"]');
+    if (input) {
+      try {
+        input.value = want;
+        input.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+        }));
+        return true;
+      } catch (e) {}
+    }
+    try {
+      for (const b of pager.querySelectorAll('button')) {
+        if (String(b.textContent || '').trim() !== want) continue;
+        if (!b.disabled) { b.click(); return true; }
+        return true; // 已经在这一页
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function locateCurrentPage() {
+    const grid = locateGridAny();
+    const pager = grid ? locatePagerOf(grid) : null;
+    if (pager) {
+      try {
+        const act = pager.querySelector('button.bgm-bg');
+        const n = act ? parseInt(String(act.textContent || '').trim(), 10) : 0;
+        if (n > 0) return n;
+      } catch (e) {}
+    }
+    try {
+      const c0 = grid && grid.children && grid.children[0];
+      if (!c0) return 0;
+      const inner = c0.querySelector('[data-character-id]');
+      const cid = pinCardCid(c0) || (inner ? pinCardCid(inner) : '');
+      if (!cid) return 0;
+      for (const p in pinPages) {
+        const rec = pinPages[p];
+        const first = rec && rec.items && rec.items[0];
+        if (first && String(first.CharacterId) === String(cid)) return Number(p) || 0;
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  function locateScrollBox(grid) {
+    try {
+      let el = grid && grid.parentElement;
+      for (let i = 0; i < 10 && el && el !== el.ownerDocument.body; i++, el = el.parentElement) {
+        if (el.classList && el.classList.contains('overflow-auto')) return el;
+        const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+        if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 4) return el;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  let templeLiveTimer = 0;
+  let templeLiveFirst = false;
+  function templeLiveRefresh(toFirst) {
+    if (toFirst) templeLiveFirst = true;
+    if (templeLiveTimer) clearTimeout(templeLiveTimer);
+    templeLiveTimer = setTimeout(() => {
+      templeLiveTimer = 0;
+      const first = templeLiveFirst;
+      templeLiveFirst = false;
+      try { templeLiveKick(first); } catch (e) {}
+    }, 220);
+  }
+  function templeLiveOld() {
+    for (const d of allDocs()) {   // 个人页可能整个在 iframe 里
+      let box = null;
+      try { box = d.querySelector('#grail .temple_list') || d.querySelector('.temple_list'); } catch (e) {}
+      if (!box) continue;
+      let page = '1';
+      try {
+        const cur = d.querySelector('#pager1 .p.p_cur');
+        const n = cur ? String(cur.getAttribute('data-page') || '') : '';
+        if (/^\d+$/.test(n)) page = n;
+      } catch (e) {}
+      let btn = null;
+      try { btn = d.querySelector('#pager1 .p[data-page="' + page + '"]'); } catch (e) {}
+      if (!btn) continue;
+      try {
+        const cached = box.querySelectorAll('.grail_list');
+        for (let i = 0; i < cached.length; i++) cached[i].remove();
+        btn.click();           // 这一页没缓存了，站点会重新请求（正好过我们改写的钩子）
+        return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+  function templeLiveKick(toFirst) {
+    let grid = null;
+    try { grid = locateGridAny(); } catch (e) {}
+    if (!grid) {
+      const old = () => { try { templeLiveOld(); } catch (e) {} };
+      if (pinAllGet()) { old(); return; }
+      pinAllLoad().then((all) => { if (all) old(); }, () => {});
+      return;
+    }
+    const page = locateCurrentPage() || 1;
+    const box = locateScrollBox(grid);
+    const top = box ? box.scrollTop : 0;
+    const keep = !(toFirst && page === 1);
+    const go = () => {
+      try { locateKickReload(page); } catch (e) {}
+      if (keep && box) {
+        setTimeout(() => { try { box.scrollTop = top; } catch (e) {} }, 700);
+      }
+    };
+    if (pinAllGet()) { go(); return; }
+    pinAllLoad().then((all) => { if (all) go(); }, () => {});
+  }
+
+  function locateRefreshBtns() {
+    try {
+      if (!els || !els.templeList) return;
+      if (!templeAll || !templeAll.length) return;
+      renderTemples();
+    } catch (e) {}
+  }
+
+  async function locateRun(id, nm) {
+    if (!locateGridAny()) {
+      setTempleStatus('正在切到「N座圣殿」…');
+      await locateEnsureTempleTab();
+    }
+    if (!locateGridAny()) {
+      locatePending = { cid: id, at: Date.now() };
+      if (locateTempleTab()) {
+        setTempleStatus('没读到圣殿列表（可能还在加载）：等一秒再点一次定位');
+        try { pinToast('圣殿列表还没出来，稍等再点一次'); } catch (e) {}
+      } else {
+        setTempleStatus('已记下：先在小圣杯主页点开你的头像、切到「N座圣殿」，开着就会自动排好');
+        try { pinToast('先点开自己的头像（圣殿页），会自动定位 ' + nm); } catch (e) {}
+      }
+      return false;
+    }
+
+    if (!pinAllGet()) {
+      setTempleStatus('正在读你的圣殿列表…');
+      try { await pinAllLoad(); } catch (e) {}
+    }
+    try { pinLocateSet(id); } catch (e) {}
+    locateRefreshBtns();
+    const t0 = Date.now();
+    setTempleStatus('正在把它排到第 1 页…');
+    const kicked = locateKickReload(1);
+    if (!kicked) {
+      const c0 = locateCardAny(id);
+      if (c0) {
+        try {
+          const el0 = locateNameOf(c0);
+          if (el0) el0.classList.add('tgtk-locate-name');
+          c0.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (e) {}
+        setTempleStatus('已标记 ' + nm + '：分页器还没渲染好，切一次分页就排到最前');
+        try { pinToast('已标记：切一次分页就排到最前'); } catch (e) {}
+        return true;
+      }
+      setTempleStatus('分页器还没渲染好：稍等一下再点定位，或手动切一次分页');
+      return false;
+    }
+    let rec = null;
+    for (let i = 0; i < 14; i++) {
+      await sleep(300);
+      const one = pinPages[1];
+      if (one && one.at >= t0 && one.items && one.items.length) { rec = one; break; }
+    }
+
+    let idx = -1;
+    if (rec && rec.items) {
+      for (let i = 0; i < rec.items.length; i++) {
+        const it = rec.items[i];
+        if (it && String(it.CharacterId) === id) { idx = i; break; }
+      }
+    }
+    let card = null;
+    for (let round = 0; round < 12; round++) {
+      const g2 = locateGridAny();
+      if (idx >= 0 && g2 && g2.children && g2.children[idx]) {
+        const c2 = g2.children[idx];
+        let cid2 = '';
+        try {
+          const inner = c2.querySelector('[data-character-id]');
+          cid2 = pinCardCid(c2) || (inner ? pinCardCid(inner) : '');
+        } catch (e) {}
+        if (!cid2 || String(cid2) === id) { card = c2; break; }
+      }
+      card = locateCardAny(id);
+      if (card) break;
+      await sleep(250);
+    }
+    if (!card) {
+      setTempleStatus(`没排上：这一轮没拿回你的列表（站点可能用了缓存），刷新一次页面再点定位`);
+      try { pinToast('没排上：刷新一次页面再点定位'); } catch (e) {}
+      return false;
+    }
+    try {
+      const nameEl = locateNameOf(card);
+      if (nameEl && !nameEl.classList.contains('tgtk-locate-name')) nameEl.classList.add('tgtk-locate-name');
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+    const pos = idx >= 0 ? `第 ${idx + 1} 个` : '已高亮';
+    setTempleStatus(`已定位：${nm} 排在第 1 页${pos}（角色名已标粉）`);
+    try { pinToast('已定位：' + nm + ' 排在第 1 页' + pos); } catch (e) {}
+    return true;
+  }
+
+  function locateClickCard(card, id, nm) {
+    try {
+      const nameEl = locateNameOf(card);
+      if (nameEl) nameEl.classList.add('tgtk-locate-name');
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+    let box = null;
+    try { box = card.querySelector('#tg-temple-image'); } catch (e) {}
+    if (!box) box = pinCoverBox(card) || card;
+    try {
+      box.click();
+      setTempleStatus('已打开塔图浮窗：' + nm + '（修改 / 道具 / 星之力都在里面）');
+      try { pinToast('已打开塔图浮窗：' + nm); } catch (e) {}
+      try {
+        const det = HDOC.querySelector('#tg-temple-detail');
+        const got = det && det.getAttribute('data-character-id');
+        if (got && String(got) !== String(id)) {
+          setTempleStatus('打开的是 #' + got + '，不是 #' + id + '：请刷新页面后重试');
+        }
+      } catch (e) {}
+      return true;
+    } catch (e) {
+      setTempleStatus('打开塔图浮窗失败：' + (e && e.message ? e.message : e));
+      return false;
+    }
+  }
+
   function renderTemples() {
     const list = els.templeList;
     list.textContent = '';
     if (!templeAll.length) return;
 
     const key = S.field;
-    const rows = templeRows();
+    const pool = templePool();
+    const rows = templeRows(pool);
     let under = 0;
-    for (let i = 0; i < templeAll.length; i++) {
-      if (num(templeAll[i][key]) < num(S.threshold)) under++;
+    for (let i = 0; i < pool.length; i++) {
+      if (num(pool[i][key]) < num(S.threshold)) under++;
     }
     const useA = templeUseAssets();
     const useC = templeUseCover();
     const coverName = S.cover === 'custom' ? '已换过塔图' : '未换塔图';
-    let head = `共 ${templeAll.length} 座塔`;
-    if (templeExcluded) head += ` · 已排除 ${fmt(templeExcluded)} 座未建成（上限 < ${TEMPLE_MIN_CAP}）`;
+    let head = `共 ${pool.length} 座塔`;
+    if (templeUseMine()) {
+      if (!mineKeys.names.length && !mineKeys.uid) {
+        list.appendChild(
+          h('div', { class: 'tgtk-empty' }, '没认出你的账号：请先在小圣杯登录，或打开一次个人页再扫')
+        );
+        els.templeStat.textContent = '只筛自己圣殿：没认出你的账号';
+        return;
+      }
+      head = `自己的圣殿 ${pool.length} 座`;
+    }
+    const exc = templeUseMine() ? templeExcludedMine : templeExcluded;
+    if (exc) head += ` · 已排除 ${fmt(exc)} 座未建成（上限 < ${TEMPLE_MIN_CAP}）`;
     if (useA && useC) head += ` · 固定资产 < ${num(S.threshold)} ${coverName}：${rows.length} 座`;
     else if (useA) head += ` · 固定资产 < ${num(S.threshold)}：${under} 座`;
     else if (useC) head += ` · ${coverName}：${rows.length} 座`;
     else head += ' · 未勾选筛选条件（全部显示）';
+    if (mineLoadFailed && S.source !== 'user') head += ' · 我的塔没读到，损坏塔可能没补上';
     els.templeStat.textContent = head;
 
     if (!rows.length) {
-      list.appendChild(h('div', { class: 'tgtk-empty' }, '没有符合条件的塔'));
+      list.appendChild(
+        h('div', { class: 'tgtk-empty' }, templeUseMine() ? '你的圣殿里没有符合条件的塔' : '没有符合条件的塔')
+      );
       return;
     }
 
@@ -2469,6 +3072,7 @@
       const hitRow = num(t[key]) < num(S.threshold);
       const ci = coverInfo(t);
       const cid = String(t.CharacterId || '');
+      const canLocate = !!cid && templeIsMine(t);
       if (cid && !t.CharacterName && !nameCache[cid] && !templeNameTried[cid]) {
         templeNameTried[cid] = 1;
         need.push(cid);
@@ -2480,11 +3084,41 @@
           h(
             'div',
             { class: 'tgtk-main' },
-            charaLink(t.CharacterId, t.CharacterName),
+            h(
+              'span',
+              { class: 'tgtk-namerow' },
+              charaLink(t.CharacterId, t.CharacterName),
+              canLocate
+                ? h(
+                    'button',
+                    {
+                      class: 'tgtk-locbtn' + (pinLocateHas(cid) ? ' on' : ''),
+                      type: 'button',
+                      title: pinLocateHas(cid)
+                        ? '已定位：再点一下取消这一座'
+                        : '把这座塔临时排到个人圣殿页第 1 页最前面（不改置顶名单）',
+                      onclick: (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (pinLocateHas(cid)) {
+                          try { pinLocateRemove(cid); } catch (err) {}
+                          setTempleStatus('已取消定位：' + (pinNameGet(cid) || charaName(cid) || '#' + cid));
+                          templeLiveRefresh(false);
+                          renderTemples();
+                          return;
+                        }
+                        locateGo(cid);
+                      },
+                    },
+                    locatePinIcon()
+                  )
+                : null
+            ),
             h(
               'span',
               { class: 'tgtk-sub' },
               `${t.Nickname || t.Name || '未知'} · 塔Lv${gxTempleLv(t)}` +
+                (t.Link || t.LinkId ? ' · LINK' : '') +
                 (t.CharacterLevel ? ` · 角色Lv${t.CharacterLevel}` : '') +
                 (ci.isDefault ? ' · 默认图' : ' · 已换图')
             )
@@ -6136,7 +6770,19 @@
       placeholder: '角色 ID，逗号或换行分隔，例如 1,2,32',
     });
     tChars.value = S.chars;
-    const tCtxChars = h('div', { class: 'tgtk-ctx', 'data-ctx': 'chars' }, tChars);
+    const chkOnlyMine = h('input', { id: 'tgtk-onlymine', type: 'checkbox' });
+    chkOnlyMine.checked = !!S.onlyMine;
+    const tCtxChars = h(
+      'div',
+      { class: 'tgtk-ctx', 'data-ctx': 'chars' },
+      tChars,
+      h(
+        'label',
+        { class: 'tgtk-chk tgtk-ctxchk', title: '勾上后只保留塔主是你的圣殿（含 LINK 塔），可以当搜索自己圣殿用' },
+        chkOnlyMine,
+        ' 只筛自己圣殿'
+      )
+    );
     const tRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '扫描');
     const tCopy = h('button', {
       class: 'tgtk-btn', type: 'button', title: '复制当前筛出的全部角色 ID（空格分隔）',
@@ -6190,7 +6836,7 @@
       tCtxChars,
       h('div', { class: 'tgtk-line tgtk-actions' }, tRun, tCopy),
       h('div', { class: 'tgtk-note' },
-        `筛选前提：只统计已建成圣殿（固定资产上限 ≥ ${TEMPLE_MIN_CAP}）；上限不足的未建成塔会自动排除`),
+        `筛选前提：只统计已建成圣殿（固定资产上限 ≥ ${TEMPLE_MIN_CAP}）；上限不足的未建成塔会自动排除。LINK 塔和「我的塔」里的损坏塔会一起并进来`),
       templeStat,
       templeList
     );
@@ -6664,15 +7310,15 @@
       ),
       icoStat,
       icoList,
-      h(
-        'div',
-        { class: 'tgtk-note' },
-        '自动注资：结束前 N 分钟若还没到目标等级，按缺口一次性补钱（补到该等级为止）。' +
-          'ICO 升级要同时满足「资金」和「人数(10+5×等级)」，人数不够时补钱也升不上去。' +
-          '计划存在本机：关掉小圣杯页、切到别的 bgm 页面、重开浏览器后都还在，' +
-          '只要还有任意一个 bgm 页面开着就会继续执行；把「结束前」设成 30 分钟，' +
-          '就算到点前关机也不怕。'
-      ),
+      h('div', { class: 'tgtk-note' }, [
+        '· 只在浏览器里跑：得有一个 bgm 页面开着（不必开小圣杯）',
+        h('br'),
+        '· 关电脑、关浏览器就停，不会补款',
+        h('br'),
+        '· 结束前 N 分钟内没到目标等级，按缺口补一次',
+        h('br'),
+        '· 人数不够（需 10+5×等级）时补钱也升不上，会跳过',
+      ]),
       icoLog
     );
 
@@ -6698,6 +7344,7 @@
     const pinSwitch = h('button', { class: 'tgtk-pintoggle', type: 'button' });
     const pinAdd = input('tgtk-pinadd', '', { placeholder: '角色名 / ID，可多个' });
     const pinAddBtn = h('button', { class: 'tgtk-btn', type: 'button' }, '置顶');
+    const pinFav = favBtn('从收藏夹选角色置顶');
     const pinStat = h('div', { class: 'tgtk-stat tgtk-pinstat' }, '');
     const pinListBox = h('div', { class: 'tgtk-pinlist' });
 
@@ -6772,12 +7419,13 @@
     );
     const botInput = input('tgtk-botadd', '', { placeholder: '角色名 / ID，可多个' });
     const botAddBtn = h('button', { class: 'tgtk-btn', type: 'button' }, '添加');
+    const botFav = favBtn('从收藏夹选角色置底');
     const botStat = h('div', { class: 'tgtk-stat' }, '');
     const botListBox = h('div', { class: 'tgtk-pinlist tgtk-botlist' });
     const botBody = h(
       'div',
       { class: 'tgtk-sectbody', hidden: 'hidden' },
-      h('div', { class: 'tgtk-line' }, botInput, botAddBtn, clearBtn(botInput)),
+      h('div', { class: 'tgtk-line' }, botInput, botAddBtn, botFav, clearBtn(botInput)),
       botStat,
       botListBox,
       h('div', { class: 'tgtk-note' }, '置底的角色会排在个人页最后一页的最后一个，不需要调顺序。')
@@ -6875,14 +7523,14 @@
       const trouble = addTroubleText(r.noTower, r.miss);
       pinToast(
         added.length
-          ? `已置底 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，刷新个人页生效`
+          ? `已置底 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，已排到最后一页最后`
           : trouble
             ? '没有可添加的角色'
             : '这些角色都已经在置底名单里了'
       );
       botStat.textContent =
         (added.length ? `已置底 ${added.length} 座。` : '') +
-        (trouble || (added.length ? '刷新个人页生效' : '这些角色都已经在置底名单里了，不用重复添加'));
+        (trouble || (added.length ? '个人圣殿页开着就当场重排，不用刷新' : '这些角色都已经在置底名单里了，不用重复添加'));
     };
     botAddBtn.addEventListener('click', () => {
       addBotNow().catch(() => {});
@@ -6893,6 +7541,17 @@
       onPick: (it) => {
         if (it && it.id) pinNameSet(it.id, it.name);
         addBotNow().catch(() => {});
+      },
+    });
+    bindFavPicker(botFav, botInput, {
+      onPick: async (cid) => {
+        botInput.value = String(cid);
+        try {
+          await addBotNow();
+        } catch (e) {
+          return false;
+        }
+        return botHas(cid);
       },
     });
 
@@ -6989,6 +7648,7 @@
       tuiSave();
       renderPinList();
       if (TUI.on) pinRefreshSnaps();
+      templeLiveRefresh(false);
       pinToast(TUI.on ? '圣殿置顶已开启' : '圣殿置顶已关闭');
     });
 
@@ -7032,7 +7692,7 @@
       const trouble = addTroubleText(r.noTower, r.miss);
       pinToast(
         added.length
-          ? `已置顶 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，刷新个人页生效`
+          ? `已置顶 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，已排到第 1 页最前`
           : trouble
             ? '没有可置顶的角色'
             : '这些角色都已经在置顶名单里了'
@@ -7052,6 +7712,17 @@
       onPick: (it) => {
         if (it && it.id) pinNameSet(it.id, it.name);
         pinAddNow().catch(() => {});
+      },
+    });
+    bindFavPicker(pinFav, pinAdd, {
+      onPick: async (cid) => {
+        pinAdd.value = String(cid);
+        try {
+          await pinAddNow();
+        } catch (e) {
+          return false;
+        }
+        return pinHas(cid);
       },
     });
 
@@ -7109,7 +7780,7 @@
         h('span', { class: 'tgtk-colname' }, '个人页圣殿置顶'),
         pinSwitch
       ),
-      h('div', { class: 'tgtk-line' }, pinAdd, pinAddBtn, clearBtn(pinAdd)),
+      h('div', { class: 'tgtk-line' }, pinAdd, pinAddBtn, pinFav, clearBtn(pinAdd)),
       pinStat,
       pinListBox
     );
@@ -7644,7 +8315,18 @@
         els.views[k].hidden = dailyOpen || k !== S.tab;
       });
       if (els.dailyView) els.dailyView.hidden = !dailyOpen;
-      if (S.tab === 'temple') ensureTempleUser();
+      if (S.tab === 'temple') {
+        ensureTempleUser();
+        if (!templeAll.length && templeScanRestore()) {
+          renderTemples();
+          setTempleStatus('已恢复上次的扫描结果（点「扫描」可刷新）');
+          loadMineKeys()
+            .then(() => {
+              if (templeAll.length && els) renderTemples();
+            })
+            .catch(() => {});
+        }
+      }
       if (S.tab === 'fav') {
         clearFavAddAutofill();
         syncFavPick();
@@ -7717,6 +8399,15 @@
     chkCover.addEventListener('change', () => {
       S.filCover = !!chkCover.checked;
       persist();
+      renderTemples();
+    });
+    chkOnlyMine.addEventListener('change', async () => {
+      S.onlyMine = !!chkOnlyMine.checked;
+      persist();
+      if (S.onlyMine && S.source === 'chars' && templeAll.length) {
+        if (els && els.templeStat) els.templeStat.textContent = '正在确认你的账号…';
+        await loadMineKeys();
+      }
       renderTemples();
     });
 
@@ -8599,6 +9290,7 @@
     if (els && els.syncStat) els.syncStat.textContent = msg;
   }
   const STAR_CSS = `
+
 #tgtk-starbox{
   position:relative;display:inline-block;flex:none;box-sizing:border-box;
   width:19px;height:19px;min-width:19px;margin:0 0 0 6px;vertical-align:middle;line-height:0}
@@ -8733,7 +9425,24 @@
     for (const d of allDocs()) {
       const favb = gxNewFavBtn(d);
       if (favb && favb.parentElement) {
-        return { doc: d, parent: favb.parentElement, after: favb, append: false, fav: true };
+        const pr = favb.parentElement;
+        let after = favb;
+        try {
+          const fr = favb.getBoundingClientRect();
+          const midY = fr.top + fr.height / 2;
+          const tol = Math.max(6, fr.height / 2);
+          const kids = Array.prototype.slice.call(pr.children);
+          const at = kids.indexOf(favb);
+          for (let i = at + 1; i < kids.length; i++) {
+            const k = kids[i];
+            if (!k || k.id === 'tgtk-starbox' || k.id === 'tgtk-star') continue;
+            const r = k.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            if (Math.abs(r.top + r.height / 2 - midY) > tol) continue;
+            after = k;
+          }
+        } catch (e) {}
+        return { doc: d, parent: pr, after, append: false, fav: true };
       }
       for (const sel of newSels) {
         let el;
@@ -9208,9 +9917,12 @@
       }
       ensureStarStyle(anchor.doc);
       if (!starBox) starBox = h('span', { id: 'tgtk-starbox' });
-      const sameAnchor = starAnchorAfter && starAnchorAfter.isConnected &&
-        starAnchorAfter === (anchor.append ? anchor.parent : anchor.after);
-      if (!starBox.isConnected || starBox.parentElement !== anchor.parent || !sameAnchor) {
+      const boxAlive = !!(starBox && starBox.isConnected && starBox.parentElement);
+      const sameAnchor = !!(starAnchorAfter && starAnchorAfter.isConnected &&
+        starAnchorAfter === (anchor.append ? anchor.parent : anchor.after));
+      const sameParent = boxAlive && starBox.parentElement === anchor.parent;
+      const idSwitched = !!starCharId && id !== starCharId;
+      if (!boxAlive || idSwitched || (!sameAnchor && !sameParent)) {
         if (starBox.isConnected) starBox.remove();
         if (anchor.append) {
           anchor.parent.appendChild(starBox);
@@ -9260,7 +9972,7 @@
       refreshStarBadge();
     };
     ensure();
-    starTimer = setInterval(ensure, 900);
+    starTimer = setInterval(ensure, 2000);
     if (!starListenersBound) {
       starListenersBound = true;
       WINS.forEach((w) => {
@@ -9270,14 +9982,26 @@
         } catch (e) {}
       });
       let moTimer = null;
-      const mo = (typeof MutationObserver !== 'undefined') ? new MutationObserver(() => {
-        clearTimeout(moTimer);
+      let moDelay = -1;
+      const moQueue = (delay) => {
+        if (moTimer) {
+          if (delay >= moDelay) return;
+          clearTimeout(moTimer); // 有更急的事：把原来排的 300ms 提前
+        }
+        moDelay = delay;
         moTimer = setTimeout(() => {
+          moTimer = null;
+          moDelay = -1;
           const id = currentCharacterId();
           const lost = !starBadge || !starBadge.isConnected ||
             (starAnchorAfter && !starAnchorAfter.isConnected);
           if (id !== starCharId || lost) ensure();
-        }, 160);
+        }, delay);
+      };
+      const mo = (typeof MutationObserver !== 'undefined') ? new MutationObserver(() => {
+        const lostNow = !starBadge || !starBadge.isConnected ||
+          (starAnchorAfter && !starAnchorAfter.isConnected);
+        moQueue(lostNow ? 0 : 300);
       }) : null;
       if (mo) {
         const observeDoc = (d) => {
@@ -9622,6 +10346,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     szAt: 0,
     foldBtn: null,
     applyGrail: null,
+    pageEver: false,
+    pageAt: 0,
+    pageWarm: 3,
   };
 
   function seamlessFor(doc) {
@@ -10305,9 +11032,49 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
   }
 
-  function gxMountSize() {
+  const gxGbCache = new WeakMap();
+  function gxGrailBoxes(d) {
+    const c = gxGbCache.get(d);
+    const now = Date.now();
+    if (c && now - c.at < 3000 && c.list.length && c.list.every((x) => x.isConnected)) return c.list;
+    let list = [];
+    try { list = Array.from(d.querySelectorAll('#grailBox,[id^="grailBox"],.grailBox')); } catch (e) {}
+    gxGbCache.set(d, { at: now, list });
+    return list;
+  }
+
+  function gxHeadScopes(gb) {
+    const out = [];
+    try {
+      const list = gb.querySelector(
+        '#lastTemples, [id^="lastTemples"], .assets, .grail_list, .temple_list'
+      );
+      if (!list) return Array.from(gb.children || []);
+      let n = list;
+      while (n && n !== gb && n.parentElement) {
+        const p = n.parentElement;
+        for (const sib of Array.from(p.children)) {
+          if (sib === n) continue;
+          if (sib.contains && sib.contains(list)) continue;
+          out.push(sib);
+        }
+        n = p;
+      }
+    } catch (e) {
+      return Array.from(gb.children || []);
+    }
+    return out; // 除了列表什么都没有 → 空数组，别退回整块
+  }
+
+  let gxSizeAt = 0;
+  const gxSizeMiss = new WeakMap(); // doc → 这之前别再全量扫
+  function gxMountSize(force) {
+    const __now = Date.now();
+    if (!force && __now - gxSizeAt < 500) return;
+    gxSizeAt = __now;
     let placed = false;
     for (const d of allDocs()) {
+      if (!force && (gxSizeMiss.get(d) || 0) > __now) continue;
       try {
         let header = d.getElementById && d.getElementById('tg-trade-box-temple-header');
         if (!header) header = d.querySelector && d.querySelector('[id^="tg-trade-box-temple"][id*="header" i]');
@@ -10327,26 +11094,33 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         }
       } catch (e) {}
       try {
-        for (const gb of d.querySelectorAll('#grailBox,[id^="grailBox"],.grailBox')) {
+        for (const gb of gxGrailBoxes(d)) {
           if (gb.hasAttribute && gb.hasAttribute('data-tgtk-dup')) continue;
           if (!/(?:^|\s)chara\d+(?:\s|$)/.test(String(gb.className || ''))) continue;
+          const scopes = gxHeadScopes(gb);
           let showAll = null;
-          for (const el of gb.querySelectorAll('a,button,span,small,em,b')) {
-            if (el.children.length) continue;
-            const t = String(el.textContent || '').replace(/[\s\[\]（）()]/g, '');
-            if (t === '显示全部' || t === '显示重复' || t === '显示全部圣殿') {
-              showAll = el;
-              break;
+          for (const sc of scopes) {
+            for (const el of sc.querySelectorAll('a,button,span,small,em,b')) {
+              if (el.children.length) continue;
+              const t = String(el.textContent || '').replace(/[\s\[\]（）()]/g, '');
+              if (t === '显示全部' || t === '显示重复' || t === '显示全部圣殿') {
+                showAll = el;
+                break;
+              }
             }
+            if (showAll) break;
           }
           let host = showAll ? showAll.parentElement : null;
           let before = showAll ? showAll.nextSibling : null;
           if (!host) {
-            for (const el of gb.querySelectorAll('div,span,p')) {
-              const t = String(el.textContent || '');
-              if (t.length > 160 || !/固定资产/.test(t)) continue;
-              if (!/显示全部|往期竞拍|萌王投票|资产重组/.test(t)) continue;
-              if (!host || host.contains(el)) host = el;
+            for (const sc of scopes) {
+              for (const el of sc.querySelectorAll('div,span,p')) {
+                const t = String(el.textContent || '');
+                if (t.length > 160 || !/固定资产/.test(t)) continue;
+                if (!/显示全部|往期竞拍|萌王投票|资产重组/.test(t)) continue;
+                if (!host || host.contains(el)) host = el;
+              }
+              if (host) break;
             }
           }
           if (host) {
@@ -10357,6 +11131,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         }
       } catch (e) {}
       if (placed) break;
+      gxSizeMiss.set(d, __now + 30000); // 本页没有可挂的地方，30 秒内别再翻
     }
     if (!placed && gxSizeEl && gxSizeEl.parentElement) gxSizeEl.remove();
   }
@@ -11064,7 +11839,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     );
   }
 
+  const gxStarLogMiss = new WeakMap(); // doc → 这之前别再全页找「通天塔」
   function gxFindStarLogHost() {
+    const __sln = Date.now();
     for (const d of allDocs()) {
       try {
         if (d.getElementById('tg-rakuen-home-babel-tower-log-list') ||
@@ -11078,6 +11855,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           host = tower.querySelector('.logs') || null;
         }
       } catch (e) {}
+      if (!host && (gxStarLogMiss.get(d) || 0) > __sln) continue;
       if (!host) {
         let t = null;
         try {
@@ -11088,14 +11866,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             break;
           }
         } catch (e) { continue; }
-        if (!t) continue;
+        if (!t) { gxStarLogMiss.set(d, __sln + 10000); continue; }
         let up = t.parentElement;
         for (let i = 0; i < 4 && up; i++, up = up.parentElement) {
           const l = up.querySelector && up.querySelector('.logs');
           if (l) { host = l; tower = up; break; }
         }
       }
-      if (!host) continue;
+      if (!host) { gxStarLogMiss.set(d, __sln + 10000); continue; }
       if (host.closest && host.closest('#tgtk-starlog')) continue;
       if (host.id === 'tgtk-starlog' || /tgtk-slog/.test(String(host.className || ''))) continue;
       return { doc: d, host };
@@ -11213,7 +11991,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     gxStarLogLoad(GXLOG.page);
   }
 
+  let gxTopWeekMissAt = 0; // 文字反查一次没结果，10 秒内别再翻整页
   function gxTopWeekCards() {
+    if (Date.now() - gxTopWeekMissAt < 10000) return [];
     const re = /^\d+\s*\/\s*[\d,]+\s*\/\s*[\d,]+$/;
     const found = [];
     for (const d of allDocs()) {
@@ -11249,7 +12029,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     groups.forEach((arr) => {
       if (arr.length > best.length) best = arr;
     });
-    return best.length >= 4 ? best : [];
+    if (best.length >= 4) return best;
+    gxTopWeekMissAt = Date.now();
+    return [];
   }
 
   async function gxTopWeek() {
@@ -11670,8 +12452,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   const gxWatch = new WeakMap();
   let gxReapplyBusy = false;
 
+  let gxReapplyAt = 0;
   function gxReapply(doc, templeDirty) {
     if (gxReapplyBusy) return;
+    try {
+      if (!doc || !doc.querySelector || !doc.querySelector('[id^="tg-"]')) return;
+    } catch (e) { return; }
+    const __now = Date.now();
+    const __rapid = __now - gxReapplyAt < 120;
+    gxReapplyAt = __now;
+    if (__rapid) {
+      gxReapplyBusy = true;
+      try { gxTempleSizeFast(!templeDirty); } catch (e) {}
+      gxReapplyBusy = false;
+      return;
+    }
     gxReapplyBusy = true;
     try {
       applySeamless(); // iframe 重载 / 新文档出现时把「无缝 link 图」开关补上
@@ -11713,6 +12508,32 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             return false;
           };
           for (const r of records) {
+            if (r.type === 'characterData' || r.type === 'childList') {
+              const t = r.type === 'characterData' ? r.target && r.target.parentElement : r.target;
+              if (t && t.nodeType === 1) {
+                try {
+                  if (t.closest && t.closest('.tgtk-starov')) continue;
+                } catch (e) {}
+                const recSame = paintedStarCards.get(t);
+                if (recSame && recSame.el && recSame.el.isConnected) {
+                  const want = String(Math.round(num(recSame.star)));
+                  if (String(recSame.el.textContent) !== want) {
+                    recSame.el.textContent = want;
+                    continue;
+                  }
+                }
+                const card = paintedCardOf(t);
+                if (card && !starSyncBusy) {
+                  starSyncBusy = true;
+                  try {
+                    const rc = paintedStarCards.get(card);
+                    if (rc) starPillPaint(card, rc.star);
+                  } catch (e) {}
+                  starSyncBusy = false;
+                  continue;
+                }
+              }
+            }
             if (r.type === 'attributes') {
               const at = r.target;
               if (at && at.nodeType === 1 && at.closest &&
@@ -11753,11 +12574,13 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           state.timer = setTimeout(() => {
             state.timer = null;
             gxReapply(doc, false);
+            pinDecorKick();
           }, 40);
         });
         mo.observe(doc.body, {
           childList: true, subtree: true,
           attributes: true, attributeFilter: ['style', 'class'],
+          characterData: true,
         });
       } catch (e) {
         continue;
@@ -12453,9 +13276,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
   }
 
+  const tgCidCoverCache = new Map();
   function tgCidByCover(cover) {
     const key = String(cover || '').match(/cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i);
     if (!key) return '';
+    const __ck = key[0];
+    const __hit = tgCidCoverCache.get(__ck);
+    if (__hit && Date.now() - __hit.at < 300000) return __hit.cid;
+    const __r = tgCidByCoverRaw(__ck, key);
+    tgCidCoverCache.set(__ck, { at: Date.now(), cid: __r });
+    return __r;
+  }
+  function tgCidByCoverRaw(key, keyMatch) {
     for (const d of allDocs()) {
       let els = [];
       try { els = d.querySelectorAll('[data-id],[data-character-id],[style*="cover"],img[src*="cover"]'); }
@@ -12463,7 +13295,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       for (const el of els) {
         const st = String((el.style && el.style.backgroundImage) || '') + ' ' +
           String(el.getAttribute('style') || '') + ' ' + String(el.getAttribute('src') || '');
-        if (!st.includes(key[0])) continue;
+        if (!st.includes(keyMatch[0])) continue;
         for (let up = el, i = 0; i < 4 && up; i++, up = up.parentElement) {
           if (!up.getAttribute) break;
           const v = String(up.getAttribute('data-id') || '');
@@ -13208,7 +14040,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const st = d.createElement('style');
       st.id = 'tgtk-gifov-style';
       st.textContent = '.tgtk-gifov{position:absolute;inset:0;z-index:1;pointer-events:none}' +
-        '.tgtk-gifov img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}';
+        '.tgtk-gifov img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}' +
+        '.tgtk-gifov.tgtk-gifov-old{z-index:0}';
       (d.head || d.documentElement).appendChild(st);
     } catch (e) {}
   }
@@ -13259,6 +14092,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   }
   function gcSync(box) {
     if (!box) return;
+    if (box.__tgtkGifOld) { gcShow(box, true); return; }
     const playing = gcPlaying(box);
     const group = gcLinkBoxes(box);
     if (group) { group.forEach((b) => gcShow(b, !playing)); return; }
@@ -13273,22 +14107,28 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       else TGGC.warmed[url] = im;
     } catch (e) {}
   }
-  function gcMount(box, url) {
+  function gcMount(box, url, old) {
     if (!box) return;
     gcWarm(url);
     const d = box.ownerDocument || HDOC;
     gcDocStyle(d);
+    if (old) box.__tgtkGifOld = 1;
     let ov = box.querySelector('.tgtk-gifov');
     if (!ov) {
       ov = d.createElement('div');
-      ov.className = 'tgtk-gifov';
+      ov.className = 'tgtk-gifov' + (old ? ' tgtk-gifov-old' : '');
       const im = d.createElement('img');
       im.alt = '';
       im.decoding = 'sync';
       ov.appendChild(im);
-      const btn = box.querySelector('button');
-      if (btn) box.insertBefore(ov, btn); else box.appendChild(ov);
+      if (old) {
+        box.insertBefore(ov, box.firstChild);
+      } else {
+        const btn = box.querySelector('button');
+        if (btn) box.insertBefore(ov, btn); else box.appendChild(ov);
+      }
     }
+    if (old && !ov.classList.contains('tgtk-gifov-old')) ov.classList.add('tgtk-gifov-old');
     const img = ov.querySelector('img');
     if (url && img.__tgtkU !== url) { img.src = url; img.__tgtkU = url; }
     if (!ov.__tgtkMo) {
@@ -13299,6 +14139,40 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     }
     gcSync(box);
   }
+  function gcPaintOldCard(card, url) {
+    const cur = String(card.style.backgroundImage || '');
+    let base = cur;
+    if (/^url\(["']?data:image\//i.test(cur)) {
+      base = card.__tgtkGifBase != null ? card.__tgtkGifBase : cur.slice(cur.indexOf('),') + 1);
+    } else {
+      card.__tgtkGifBase = cur;   // 站点自己的那层，先记下来
+    }
+    const want = 'url("' + url + '"),' + base;
+    if (cur !== want) card.style.backgroundImage = want;
+  }
+  function gcUnpaintOldCards(d) {
+    let cards = [];
+    try { cards = d.querySelectorAll('.item[data-id] .card[data-id]'); } catch (e) { return; }
+    for (let i = 0; i < cards.length; i++) {
+      const card = cards[i];
+      if (card.__tgtkGifBase == null) continue;
+      try { card.style.backgroundImage = card.__tgtkGifBase; } catch (e) {}
+      card.__tgtkGifBase = null;
+    }
+  }
+  function gcApplyOld(d) {
+    let cards = [];
+    try { cards = d.querySelectorAll('.item[data-id] .card[data-id]'); } catch (e) { cards = []; }
+    for (let i = 0; i < cards.length; i++) {
+      const card = cards[i];
+      const m = /^(\d+)#(\d+)$/.exec(String(card.getAttribute('data-id') || ''));
+      if (!m) continue; // 旧版 LINK 卡是 cid_uid（两半拼图），一律不贴
+      const cid = m[2];
+      const url = TGGC.binds[cid + ':' + m[1]] || TGGC.binds[cid + ':*'];
+      if (url) gcPaintOldCard(card, url);
+    }
+  }
+
   function gcApplyAll() {
     if (!Object.keys(TGGC.binds).length) return;
     for (const d of allDocs()) {
@@ -13313,6 +14187,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         const box = gcCoverBox(host);
         if (box) gcMount(box, url);
       }
+      gcApplyOld(d);
     }
     TGGC.obs = TGGC.obs.filter((o) => {
       if (o.box && o.box.isConnected) return true;
@@ -13323,6 +14198,12 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function gcTempleish(node) {
     if (!node || node.nodeType !== 1) return false;
     if (/^tg-temple/.test(node.id || '')) return true;
+    try {
+      if (node.matches) {
+        if (node.matches('.card[data-id]')) return true;
+        if (node.matches('.item[data-id], .grail_list')) return true;
+      }
+    } catch (e) {}
     return !!(node.querySelector && node.querySelector(GC_SEL));
   }
   function gcDocMutation(muts) {
@@ -13354,6 +14235,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           const mo = new MutationObserver(gcDocMutation);
           mo.observe(d.documentElement, { childList: true, subtree: true });
           TGGC.mos.push(mo);
+        } catch (e) {}
+        try {
+          d.addEventListener('click', (e) => {
+            try {
+              if (!Object.keys(TGGC.binds).length) return;
+              const t = e.target;
+              const hit = t && t.closest && t.closest('.grail_user_tab, #pager1, .item[data-id], .grail_list');
+              if (!hit) return;
+              setTimeout(() => { try { gcApplyAll(); } catch (err) {} }, 60);
+              setTimeout(() => { try { gcApplyAll(); } catch (err) {} }, 320);
+            } catch (err) {}
+          }, true);
         } catch (e) {}
       }
     };
@@ -13403,6 +14296,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       try {
         const list = d.querySelectorAll('.tgtk-gifov');
         for (let i = 0; i < list.length; i++) list[i].remove();
+        gcUnpaintOldCards(d);
       } catch (e) {}
     }
     gcSaveBinds();
@@ -13481,7 +14375,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     let gifPlaying = false;
     let gifTimer = 0;
     let gifTok = 0;                  // 取帧竞态保护
-    let gifOnly = false;             // 只更换封面：只贴图，不重新生成 GIF
+    let gifOnly = true;              // 只更换封面：默认勾上，只贴图、不重新生成 GIF
     let gifBusy = false;
     let fitGap = null;               // LINK：用留白把浮窗总高锁在开窗那一刻（盒子建好后赋值）
 
@@ -13530,7 +14424,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const gifOpen = tgH(cropDoc, 'a', { class: 'tgtk-crop-openlink', href: '#', target: '_blank',
       rel: 'noopener noreferrer', title: '在新标签打开本塔的 GIF，另存后拖进上面的黑色区域' }, '本塔GIF可另存后拖入');
     const gifOpenRow = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip', hidden: '' }, gifOpen);
-    const gifOnlyChk = tgH(cropDoc, 'input', { type: 'checkbox', 'data-tgtk': '1' });
+    const gifOnlyChk = tgH(cropDoc, 'input', { type: 'checkbox', checked: 'checked', 'data-tgtk': '1' });
     const gifOnlyRow = tgH(cropDoc, 'label', { class: 'tgtk-crop-chk', hidden: '' }, gifOnlyChk,
       tgH(cropDoc, 'span', null, '只更换封面（只在本机贴图，不改站点上的 GIF）'));
     const stage = tgH(cropDoc, 'div', { class: 'tgtk-crop-stage' }, cvs,
@@ -13577,9 +14471,13 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const refreshTip = () => {
       if (link) { tip.textContent = ''; return; }   // LINK 不要说明行（用户要求），信息都在按键和帧信息里
       if (gifMode) {
+        if (target.kind === 'old') {
+          tip.textContent = '旧版不支持 GIF 塔图：拖入 .gif 选一帧贴成封面即可（只在本机生效）';
+          return;
+        }
         if (st.img && !st.animated) {
           tip.textContent = gifOnly
-            ? '静态图：只在本机贴图，站点上的塔图不动'
+            ? '静态图：只在本机贴图，站点上的塔图不动（取消「只更换封面」才直接换塔图）'
             : '静态图：直接更换塔图，不贴图（勾「只更换封面」才贴）';
           return;
         }
@@ -14754,8 +15652,59 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function mergeBotList(incoming) {
     return mergeIdList(incoming, 'bots');
   }
+
+  const LS_LOCATE = 'tgtk:locate:v1';
+  let locateScrolledFor = ''; // 已经滚动过的 cid（每个定位只滚一次）
+  function pinLocateGet() {
+    let o = null;
+    try { o = JSON.parse(localStorage.getItem(LS_LOCATE) || 'null'); } catch (e) {}
+    if (!o) return null;
+    let list = Array.isArray(o.cids) ? o.cids.slice() : (o.cid ? [o.cid] : []);
+    list = list.map((x) => String(x)).filter((x) => /^\d+$/.test(x));
+    if (!list.length) return null;
+    return { cids: list, at: num(o.at) };
+  }
+  function pinLocateSet(cid) {
+    const id = String(cid);
+    if (!/^\d+$/.test(id)) return;
+    const cur = pinLocateGet();
+    const list = (cur ? cur.cids.filter((x) => x !== id) : []);
+    list.unshift(id);
+    const o = { cids: list.slice(0, 30), at: Date.now() };
+    try { localStorage.setItem(LS_LOCATE, JSON.stringify(o)); } catch (e) {}
+    locateScrolledFor = '';
+  }
+  function pinLocateRemove(cid) {
+    const id = String(cid);
+    const cur = pinLocateGet();
+    if (!cur) return;
+    const list = cur.cids.filter((x) => x !== id);
+    try {
+      if (list.length) localStorage.setItem(LS_LOCATE, JSON.stringify({ cids: list, at: Date.now() }));
+      else localStorage.removeItem(LS_LOCATE);
+    } catch (e) {}
+    locateScrolledFor = '';
+  }
+  function pinLocateHas(cid) {
+    const cur = pinLocateGet();
+    return !!cur && cur.cids.indexOf(String(cid)) >= 0;
+  }
+  function pinLocateClear() {
+    try { localStorage.removeItem(LS_LOCATE); } catch (e) {}
+    locateScrolledFor = '';
+    try {
+      for (const d of allDocs()) {
+        d.querySelectorAll('.tgtk-locate-name').forEach((x) => x.classList.remove('tgtk-locate-name'));
+        d.querySelectorAll('.tgtk-locate-hit').forEach((x) => x.classList.remove('tgtk-locate-hit', 'tgtk-locate-done'));
+        const bar = d.getElementById('tgtk-locate-bar');
+        if (bar) bar.remove();
+      }
+    } catch (e) {}
+    locateWasActive = false;
+  }
+
   function pinOn() {
-    return (TUI.on && TUI.pins.length > 0) || TUI.bots.length > 0;
+    return (TUI.on && TUI.pins.length > 0) || TUI.bots.length > 0 || !!pinLocateGet();
   }
   function pinOwnedSetNow() {
     const all = pinAllGet();
@@ -14902,6 +15851,16 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function pinOrdered(all) {
     const used = Object.create(null);
     const head = [];
+    const loc = pinLocateGet();
+    if (loc) {
+      for (const cid of loc.cids) {
+        if (used[cid]) continue;
+        const it = all.find((x) => x && String(x.CharacterId) === cid) || pinSnapGet(cid);
+        if (!it) continue;
+        used[cid] = 1;
+        head.push(it);
+      }
+    }
     if (TUI.on) {
       for (let i = 0; i < TUI.pins.length; i++) {
         const cid = TUI.pins[i];
@@ -14924,6 +15883,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     if (TUI.bots.length) {
       const tail = [];
       TUI.bots.forEach((cid) => {
+        if (head.some((x) => x && String(x.CharacterId) === cid)) return; // 已排到最前（定位/置顶）
         const at = rest.findIndex((x) => x && String(x.CharacterId) === cid);
         if (at >= 0) {
           tail.push(rest[at]);
@@ -15218,6 +16178,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     tuiSave();
     if (on) pinRefreshSnaps();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(on);
     return on;
   }
 
@@ -15240,6 +16201,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     tuiSave();
     if (on) pinRefreshSnaps();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(false);
     return on;
   }
 
@@ -15254,6 +16216,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     TUI.pins = list;
     tuiSave();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(false);
   }
 
   function pinReorder(from, to, before) {
@@ -15270,6 +16233,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     TUI.pins = list;
     tuiSave();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(false);
   }
 
   let pinDragFrom = '';
@@ -15546,7 +16510,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           e.stopPropagation();
           if (e.stopImmediatePropagation) e.stopImmediatePropagation();
           const on = pinToggle(cid, null);
-          pinToast(on ? '已置顶，刷新个人页生效' : '已取消置顶，刷新个人页生效');
+          pinToast(on ? '已置顶：已排到第 1 页最前' : '已取消置顶');
         },
         true
       );
@@ -15721,6 +16685,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
   function starOfCharaCard(card) {
     if (!card || !card.getAttribute) return null;
+    let __c = null;
+    try { __c = card.__tgtkStarC || null; } catch (e) {}
+    const __stamp = starCharaCid + '@' + starCharaAt + '#' + ((Date.now() / 60000) | 0);
+    if (__c && __c.s === __stamp) return __c.v;
+    const __v = starOfCharaCardSlow(card);
+    try { card.__tgtkStarC = { s: __stamp, v: __v }; } catch (e) {}
+    return __v;
+  }
+  function starOfCharaCardSlow(card) {
     let uid = String(card.getAttribute('data-user-id') || '');
     const raw = String(card.getAttribute('data-id') || '');
     if (!uid) {
@@ -15765,12 +16738,36 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return /^\d+$/.test(v) ? v : '';
   }
 
+  function starCharaScope(d) {
+    try {
+      const mods = d.querySelectorAll(
+        '#tg-modal, [id^="tg-modal"], dialog.tinygrail, [id*="character-modal" i], #TB_window, ' +
+        '.dialog, .new_dialog'
+      );
+      for (let i = mods.length - 1; i >= 0; i--) {
+        const m = mods[i];
+        if (!m || !m.isConnected) continue;
+        const box = m.querySelector('#grailBox, [id^="grailBox"]');
+        if (box && /(^|\s)chara\d+(\s|$)/.test(String(box.className || ''))) {
+          if (tgNodeVisible(m)) return m;
+          continue;
+        }
+        if (!m.querySelector(
+          '[id^="tg-trade-box"], [id^="tg-ico-box"], [id^="tg-character"], [data-character-id]'
+        )) continue;
+        if (tgNodeVisible(m)) return m;
+      }
+    } catch (e) {}
+    return d;
+  }
+
   function starPageIsChara(d) {
     try {
       const p = String((d.defaultView && d.defaultView.location && d.defaultView.location.pathname) || '');
       if (/\/user\//.test(p)) return false;
       if (/\/character\/|\/chara\//i.test(p)) return true;
     } catch (e) {}
+    if (starCharaScope(d) !== d) return true;
     try {
       if (d.querySelector('[id^="tg-trade-box-temple"] > .item')) return true;
       let cid = '';
@@ -15824,18 +16821,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const br = root.getBoundingClientRect();
       if (br.width < 40) return null;
       const kids = root.querySelectorAll('*');
+      let any = null;
       for (let i = 0; i < kids.length; i++) {
         const k = kids[i];
         if (k.childElementCount) continue;
         if (k.classList && k.classList.contains('tgtk-pinpill')) continue;
+        if (k.classList && k.classList.contains('tgtk-starbadge')) continue;
         const el = ok(k);
         if (!el) continue;
         const r = el.getBoundingClientRect();
         if (r.left < br.left + br.width * 0.4) continue; // 只认右半
         if (r.top < br.top + br.height * 0.35) continue; // 和下半区
-        return el;
+        if (/^[+\-–—]/.test(String(k.textContent || '').trim())) return el;
+        if (!any) any = el;
       }
-      return null;
+      return any;
     };
     let pos = byPos(box);
     if (!pos && box !== card) pos = byPos(card);
@@ -15846,9 +16846,20 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return ok(hit);
   }
 
+  const paintedStarEls = new WeakSet();
+  const paintedStarCards = new WeakMap();
+  let starSyncBusy = false;
+  function paintedCardOf(node) {
+    let n = node;
+    for (let i = 0; i < 9 && n; i++, n = n.parentElement) {
+      if (paintedStarCards.has(n)) return n;
+    }
+    return null;
+  }
+
   function starPillPaint(card, star) {
     const box = pinCoverBox(card) || card;
-    if (!box || !box.getBoundingClientRect) return;
+    if (!box || !box.getBoundingClientRect) return false;
     let el = null;
     try {
       el = card.__tgtkStarEl || null;
@@ -15859,7 +16870,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         card.__tgtkStarEl = el;
       } catch (e) {}
     }
-    if (!el) return;
+    if (!el) return false;
     const tier = star >= 10000 ? 0 : star > 0 ? 1 : 2;
     if (!el.hasAttribute('data-tgtk-ori')) el.setAttribute('data-tgtk-ori', String(el.textContent || ''));
     if (!el.hasAttribute('data-tgtk-orititle')) {
@@ -15868,24 +16879,53 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const txt = String(Math.round(num(star)));
     const changed = el.textContent !== txt;
     if (changed) el.textContent = txt;
+    paintedStarEls.add(el);
+    try { el.__tgtkStarVal = txt; } catch (e) {}
+    try { paintedStarCards.set(card, { star: num(star), el }); } catch (e) {}
     el.style.setProperty('background', STAR_TIERS[tier].bg, 'important');
     el.style.setProperty('border-color', STAR_TIERS[tier].bd, 'important');
     el.style.setProperty('color', '#fff', 'important');
-    el.style.setProperty('padding', '1px 5px', 'important');
-    el.style.setProperty('font-size', '10px', 'important');
-    el.style.setProperty('line-height', '1.5', 'important');
-    el.style.setProperty('white-space', 'nowrap', 'important');
-    el.style.setProperty('text-shadow', '0 1px 2px rgba(0,0,0,.35)', 'important');
-    el.style.setProperty('width', 'auto', 'important');
-    el.style.setProperty('max-width', 'none', 'important');
-    el.style.setProperty('min-width', '34px', 'important');
-    el.style.setProperty('box-sizing', 'border-box', 'important');
-    el.style.setProperty('text-align', 'center', 'important');
-    el.style.setProperty('text-overflow', 'clip', 'important');
-    el.style.setProperty('overflow', 'visible', 'important');
-    if (changed || !el.style.right) {
+    if (!el.__tgtkStarSized) {
+      el.__tgtkStarSized = 1;
+      el.style.setProperty('padding', '1px 5px', 'important');
+      el.style.setProperty('font-size', '10px', 'important');
+      el.style.setProperty('line-height', '1.5', 'important');
+      el.style.setProperty('white-space', 'nowrap', 'important');
+      el.style.setProperty('text-shadow', '0 1px 2px rgba(0,0,0,.35)', 'important');
+      if (!(el.classList && el.classList.contains('buff'))) {
+        el.style.setProperty('border-radius', '999px', 'important');
+      }
+      el.style.setProperty('z-index', '8', 'important');
       try {
-        const host = box.getBoundingClientRect();
+        const cs = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+        if (cs.position === 'static') el.style.setProperty('position', 'relative', 'important');
+      } catch (e) {}
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.setProperty('max-width', 'none', 'important');
+      el.style.setProperty('min-width', '34px', 'important');
+      el.style.setProperty('box-sizing', 'border-box', 'important');
+      el.style.setProperty('text-align', 'center', 'important');
+      el.style.setProperty('text-overflow', 'clip', 'important');
+      el.style.setProperty('overflow', 'visible', 'important');
+    }
+    if (changed || !el.hasAttribute('data-tgtk-fit')) {
+      try {
+        let host = box.getBoundingClientRect();
+        const dv = el.ownerDocument.defaultView || window;
+        for (let n = el.parentElement, i = 0; n && n !== box && i < 5; n = n.parentElement, i++) {
+          let cs2 = null;
+          try {
+            cs2 = dv.getComputedStyle(n);
+          } catch (e) {
+            break;
+          }
+          if (cs2.overflowX !== 'visible' || cs2.overflowY !== 'visible') {
+            const r2 = n.getBoundingClientRect();
+            if (r2.width && r2.right < host.right) host = r2;
+            break;
+          }
+        }
+        el.style.removeProperty('transform');
         if (el.getBoundingClientRect().right > host.right - 1) {
           el.style.setProperty('left', 'auto', 'important');
           el.style.setProperty('right', '3px', 'important');
@@ -15893,10 +16933,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         if (el.scrollWidth > el.clientWidth + 1) {
           el.style.setProperty('width', 'max-content', 'important');
         }
+        const over = Math.ceil(el.getBoundingClientRect().right - (host.right - 6));
+        if (over > 0) el.style.setProperty('transform', `translateX(-${over}px)`, 'important');
+        el.setAttribute('data-tgtk-fit', '1');
       } catch (e) {}
     }
     const tip = `星之力 ${fmt(star)} · ${star >= 10000 ? '已冲星' : star > 0 ? '有贡献' : '未冲星'}`;
     if (el.title !== tip) el.title = tip;
+    return true;
   }
 
   function starPillRestore() {
@@ -15909,11 +16953,12 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           el.removeAttribute('data-tgtk-ori');
           ['background', 'border-color', 'color', 'padding', 'font-size', 'line-height', 'white-space', 'text-shadow',
             'width', 'min-width', 'max-width', 'box-sizing', 'text-align', 'text-overflow', 'overflow',
-            'left', 'right'].forEach((k) => {
+            'left', 'right', 'transform', 'border-radius', 'z-index', 'position'].forEach((k) => {
             try {
               el.style.removeProperty(k);
             } catch (e) {}
           });
+          el.removeAttribute('data-tgtk-fit');
           const ti = el.getAttribute('data-tgtk-orititle');
           if (ti) el.setAttribute('title', ti);
           else el.removeAttribute('title');
@@ -15928,18 +16973,748 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     starCharaAt = 0;
     starOwner = '';
     starLoadedAt = 0;
+    starBadgeRemove();
+  }
+
+  const STAR_BADGE_CLS = 'tgtk-starbadge';
+  function starBadgeRemove() {
+    for (const d of allDocs()) {
+      try {
+        d.querySelectorAll('.' + STAR_BADGE_CLS).forEach((el) => el.remove());
+      } catch (e) {}
+    }
+  }
+
+  function starForCard(card, cid, charaPage) {
+    if (charaPage) return starOfCharaCard(card);
+    if (cid && cid in starMap) return starMap[cid];
+    return starOfCharaCard(card);
+  }
+
+  function starCardPaint(card, star) {
+    starPillPaint(card, star);
+  }
+
+  const holdListCache = Object.create(null); // cid → { at, items, pages, p }
+  const holdNumCache = Object.create(null); // cid|name → { at, n }
+  const holdTotalCache = Object.create(null); // cid → { at, total }
+
+  function holdTotalOf(cid) {
+    const c = holdTotalCache[cid];
+    if (c && Date.now() - c.at < 300000) return Promise.resolve(c.total);
+    return api(`chara/${cid}`, { timeout: 20000 })
+      .then((v) => {
+        const t = num(v && v.Total);
+        holdTotalCache[cid] = { at: Date.now(), total: t };
+        return t;
+      })
+      .catch(() => 0);
+  }
+
+  function holdListOf(cid, rank) {
+    const c = holdListCache[cid];
+    if (c && c.p) return c.p;
+    if (c && Date.now() - c.at < 300000 && (!rank || c.items.length >= rank || c.pages >= 5)) {
+      return Promise.resolve(c.items);
+    }
+    const prev = c && Date.now() - c.at < 300000 ? c : null;
+    let items = prev ? prev.items.slice() : [];
+    let pages = prev ? prev.pages || 1 : 0;
+    const need = Math.max(1, Math.ceil((rank || 1) / 100));
+    const stop = Math.min(5, Math.max(need, pages + 1));
+    const job = (async () => {
+      for (let p = pages + 1; p <= stop; p++) {
+        const v = await api(`chara/users/${cid}/${p}/100`, { timeout: 20000 });
+        const list = (v && v.Items) || [];
+        items = items.concat(list);
+        pages = p;
+        if (!list.length) break;
+      }
+      holdListCache[cid] = { at: Date.now(), items, pages };
+      return items;
+    })();
+    holdListCache[cid] = { at: (prev && prev.at) || 0, items, pages, p: job };
+    job.catch(() => {
+      const cc = holdListCache[cid];
+      if (cc && cc.p === job) delete holdListCache[cid];
+    });
+    return job;
+  }
+
+  function holdOf(cid, name) {
+    const k = cid + '|' + name;
+    const c = holdNumCache[k];
+    if (c && c.p) return c.p;
+    if (c && Date.now() - c.at < 300000) return Promise.resolve(c.n);
+    const job = api(`chara/user/${cid}/${encodeURIComponent(name)}/false`, { timeout: 20000 })
+      .then((v) => {
+        const n = num(v && (v.Total !== undefined ? v.Total : v.Amount));
+        holdNumCache[k] = { at: Date.now(), n };
+        return n;
+      });
+    holdNumCache[k] = { at: 0, n: 0, p: job };
+    job.catch(() => { delete holdNumCache[k]; });
+    return job;
+  }
+
+  const HOLD_QM_RE = /\?{2,}|？{2,}/;
+  function holdBadgeOf(el) {
+    if (!el || el.nodeType !== 1 || !el.getBoundingClientRect) return null;
+    const t = String(el.textContent || '').trim();
+    if (!t || t.length > 10) return null;
+    if (!HOLD_QM_RE.test(t)) return null;
+    if (/\d/.test(t)) return null; // 已经填过数字了
+    const r = el.getBoundingClientRect();
+    if (r.width > 200 || r.height > 48 || r.width < 6) return null;
+    return el;
+  }
+
+  function holdUserNames(root) {
+    const names = [];
+    if (!root || !root.querySelectorAll) return names;
+    try {
+      const links = root.querySelectorAll('a[href*="/user/"]');
+      for (let i = 0; i < links.length && i < 6; i++) {
+        const m = /\/user\/([^/?#]+)/.exec(links[i].getAttribute('href') || '');
+        const nm = m && decodeURIComponent(m[1]);
+        if (nm && names.indexOf(nm) < 0) names.push(nm);
+      }
+    } catch (e) {}
+    return names;
+  }
+
+  function holdPillCount(root) {
+    if (!root || !root.querySelectorAll) return 0;
+    let n = 0;
+    const all = root.querySelectorAll('*');
+    for (let i = 0; i < all.length && i < 400; i++) {
+      const k = all[i];
+      if (!holdBadgeOf(k)) continue;
+      let nested = false;
+      const inner = k.querySelectorAll('*');
+      for (let j = 0; j < inner.length && j < 20; j++) {
+        if (holdBadgeOf(inner[j])) {
+          nested = true;
+          break;
+        }
+      }
+      if (!nested) {
+        n++;
+        if (n > 1) return n; // 够判断了，别把整块董事会都扫一遍
+      }
+    }
+    return n;
+  }
+
+  function holdCardOf(el) {
+    let best = (el && el.parentElement) || el;
+    let p = el && el.parentElement;
+    for (let i = 0; i < 8 && p && p.nodeType === 1; i++, p = p.parentElement) {
+      try {
+        if (!p.contains || !p.contains(el)) break;
+        if (String(p.textContent || '').length > 200) break;
+        if (holdUserNames(p).length > 1) break;
+        if (holdPillCount(p) > 1) break;
+        best = p;
+      } catch (e) {
+        break;
+      }
+    }
+    return best;
+  }
+
+  function holdRankOf(el, cardEl) {
+    if (!cardEl || !cardEl.querySelectorAll) return 0;
+    try {
+      const t = cardEl.querySelector('.title');
+      const v = t ? String(t.textContent || '').trim() : '';
+      if (/^\d{1,4}$/.test(v)) return num(v);
+    } catch (e) {}
+    const walk = cardEl.querySelectorAll('*');
+    for (let i = 0; i < walk.length && i < 40; i++) {
+      const k = walk[i];
+      if (k === el || (k.contains && k.contains(el))) continue;
+      if (k.childElementCount) continue;
+      if (k.classList && k.classList.contains(STAR_BADGE_CLS)) continue;
+      const t = String(k.textContent || '').trim();
+      if (/^\d{1,4}$/.test(t)) return num(t);
+    }
+    return 0;
+  }
+
+  function holdNameDirect(cardEl) {
+    if (!cardEl) return '';
+    const names = holdUserNames(cardEl);
+    if (names.length === 1) return names[0];
+    try {
+      const nm = cardEl.getAttribute && cardEl.getAttribute('data-user-name');
+      if (nm) return String(nm);
+    } catch (e) {}
+    return '';
+  }
+
+  function holdNameOf(cardEl, list, rank) {
+    const txt = String((cardEl && cardEl.textContent) || '');
+    let uid = '';
+    try {
+      uid = String((cardEl && cardEl.getAttribute && cardEl.getAttribute('data-user-id')) || '');
+    } catch (e) {}
+    if (uid) {
+      for (let i = 0; i < list.length; i++) {
+        if (String(list[i].Id) === uid) return String(list[i].Name || '');
+      }
+    }
+    const hits = [];
+    for (let i = 0; i < list.length; i++) {
+      const nm = String(list[i].Nickname || '');
+      if (nm && nm.length > 1 && txt.indexOf(nm) >= 0) hits.push(list[i]);
+    }
+    if (hits.length === 1) return String(hits[0].Name || '');
+    if (hits.length > 1) {
+      if (rank && list[rank - 1] && hits.indexOf(list[rank - 1]) >= 0) {
+        return String(list[rank - 1].Name || '');
+      }
+      return '';
+    }
+    if (rank && list[rank - 1] && !list[rank - 1].Nickname) return String(list[rank - 1].Name || '');
+    return '';
+  }
+
+  async function holdShow(el) {
+    if (!el || el.__tgtkHoldBusy) return;
+    const ori = String(el.textContent || '');
+    if (!HOLD_QM_RE.test(ori) || /\d/.test(ori)) return;
+    const cid = currentCharacterId();
+    if (!cid) return;
+    el.__tgtkHoldBusy = 1;
+    try {
+      const cardEl = holdCardOf(el);
+      let name = holdNameDirect(cardEl);
+      if (!name) {
+        const rank = holdRankOf(el, cardEl);
+        const list = await holdListOf(cid, rank);
+        if (!list.length) return;
+        name = holdNameOf(cardEl, list, rank);
+        if (!name) {
+          const more = await holdListOf(cid, 300);
+          name = holdNameOf(cardEl, more, rank);
+        }
+      }
+      if (!name) return;
+      const n = await holdOf(cid, name);
+      if (!el.isConnected || String(el.textContent || '') !== ori) return;
+      const total = await holdTotalOf(cid);
+      if (!el.isConnected || String(el.textContent || '') !== ori) return;
+      if (!el.hasAttribute('data-tgtk-hold-ori')) el.setAttribute('data-tgtk-hold-ori', ori);
+      const pct = total > 0 ? (n / total) * 100 : 0;
+      el.textContent = total > 0 ? `${fmt(n)} ${pct.toFixed(2)}%` : fmt(n);
+      el.title = total > 0
+        ? `持股 ${fmt(n)} 股 · 占比 ${pct.toFixed(2)}%（再点一下收起）`
+        : `持股 ${fmt(n)} 股（再点一下收起）`;
+    } catch (e) {
+    } finally {
+      delete el.__tgtkHoldBusy;
+    }
+  }
+
+  function holdRestore(el) {
+    if (!el || !el.hasAttribute || !el.hasAttribute('data-tgtk-hold-ori')) return;
+    el.textContent = el.getAttribute('data-tgtk-hold-ori');
+    el.removeAttribute('data-tgtk-hold-ori');
+    el.removeAttribute('title');
+  }
+
+  function holdClickTarget(el) {
+    let n = el;
+    for (let i = 0; n && n.nodeType === 1 && i < 4; i++, n = n.parentElement) {
+      if (n.hasAttribute && n.hasAttribute('data-tgtk-hold-ori')) return n;
+      if (holdBadgeOf(n)) return n;
+    }
+    return null;
+  }
+
+  function holdWire(doc) {
+    if (!doc || doc.__tgtkHold) return;
+    doc.__tgtkHold = true;
+    try {
+      doc.addEventListener('click', (e) => {
+        const t = holdClickTarget(e.target);
+        if (!t) return;
+        try {
+          e.preventDefault();
+          e.stopPropagation();
+        } catch (err) {}
+        const ori = t.getAttribute('data-tgtk-hold-ori');
+        if (ori != null && String(t.textContent || '') !== ori) {
+          holdRestore(t);
+          return;
+        }
+        if (ori != null) t.removeAttribute('data-tgtk-hold-ori'); // 站点重绘把字改回去了
+        holdShow(t);
+      }, true);
+      doc.addEventListener('mouseover', (e) => {
+        let n = e.target;
+        for (let i = 0; n && n.nodeType === 1 && i < 3; i++, n = n.parentElement) {
+          if (n.hasAttribute && n.hasAttribute('data-tgtk-hold-ori')) return;
+          if (holdBadgeOf(n)) {
+            if (!n.title) n.title = '点击查看持股';
+            n.style.cursor = 'pointer';
+            return;
+          }
+        }
+      }, true);
+    } catch (e) {}
   }
 
   let pinDecorAt = 0;
-  function pinDecorTick() {
-    const now = Date.now();
-    if (now - pinDecorAt < 900) return; // 站点每次重绘都会把按钮冲掉，慢一点补，别每轮都扫
-    pinDecorAt = now;
+  let pinDecorKickAt = 0;
+
+  let locateWasActive = false;
+  function ensureLocateStyle(d) {
+    try {
+      if (!d || d.getElementById('tgtk-locate-style')) return;
+      const st = d.createElement('style');
+      st.id = 'tgtk-locate-style';
+      st.textContent = [
+        '.tgtk-locate-name{color:#e46fa1 !important;font-weight:700}',
+        '#tgtk-locate-bar{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483005;display:flex;align-items:center;gap:8px;padding:7px 10px 7px 12px;border-radius:10px;background:#fff5f9;color:#a8305f;border:1px solid #f0b6cf;font:12px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 8px 22px rgba(160,80,120,.22)}',
+        '#tgtk-locate-bar b{color:#c2356c}',
+        '#tgtk-locate-bar button{border:1px solid #e46fa1;background:#fff;color:#c2356c;border-radius:6px;padding:2px 8px;font:inherit;font-size:11px;cursor:pointer}',
+        '#tgtk-locate-bar button:hover{background:#ffe8f1}',
+      ].join('\n');
+      (d.head || d.documentElement).appendChild(st);
+    } catch (e) {}
+  }
+
+  function locateHosts(d) {
+    const out = [];
+    const push = (el) => {
+      if (el && out.indexOf(el) < 0 && tgNodeVisible(el)) out.push(el);
+    };
+    try {
+      d.querySelectorAll('#tg-user-tinygrail, #tg-modal, [id^="tg-modal"], dialog.tinygrail').forEach((el) => {
+        if (!el.querySelector('div.grid.w-full.gap-4')) return;
+        let head = '';
+        try { head = String(el.textContent || '').slice(0, 3000); } catch (e) { head = ''; }
+        if (!/座圣殿/.test(head)) return;
+        push(el);
+      });
+    } catch (e) {}
+    let onUserPage = false;
+    try {
+      onUserPage = /^\/user\//.test(String((d.defaultView && d.defaultView.location && d.defaultView.location.pathname) || ''));
+    } catch (e) {}
+    try {
+      d.querySelectorAll('#grail .grail_list, #grail .temple_list').forEach((el) => {
+        if (!onUserPage && !el.querySelector('.item[data-id] .title, .item[data-id] .name')) return;
+        if (!el.querySelector('.item[data-id]')) return;
+        push(el);
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  function locateGrids(d) {
+    const out = [];
+    try {
+      d.querySelectorAll('div.grid.w-full.gap-4').forEach((g) => {
+        if (!g.children || !g.children.length) return;
+        for (const card of g.children) {
+          try {
+            if (card.querySelector && card.querySelector('[data-character-id][data-sacrifices]')) {
+              out.push(g);
+              return;
+            }
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  function locatePanelRoot() {
     for (const d of allDocs()) {
+      let tabs = [];
+      try { tabs = d.querySelectorAll('[role="tab"]'); } catch (e) { continue; }
+      for (const t of tabs) {
+        if (!/座圣殿/.test(String(t.textContent || ''))) continue;
+        if (t.closest && t.closest('#tgtk-panel,#tgtk-fab')) continue;
+        let el = t;
+        let top = t;
+        for (let i = 0; i < 20 && el && el.parentElement && el.parentElement !== d.body; i++) {
+          el = el.parentElement;
+          top = el;
+        }
+        return { doc: d, root: top };
+      }
+    }
+    return null;
+  }
+
+  function locateGridAny() {
+    const p = locatePanelRoot();
+    if (p) {
+      const gs = locateGrids(p.root);
+      if (gs.length) return gs[0];
+      return null;
+    }
+    const cands = [];
+    for (const d of allDocs()) {
+      for (const g of locateGrids(d)) cands.push(g);
+    }
+    for (const g of cands) {
+      try { if (locatePagerOf(g)) return g; } catch (e) {}
+    }
+    return null;
+  }
+
+  function locateCardAny(cid) {
+    for (const d of allDocs()) {
+      let c = null;
+      try { c = locateCardOf(d, cid); } catch (e) {}
+      if (c) return c;
+    }
+    return null;
+  }
+
+  function locateHasList(d) {
+    return locateGrids(d).length > 0 || locateHosts(d).length > 0;
+  }
+  function locateHasAny() {
+    if (locatePanelRoot()) return true;
+    return !!locateGridAny();
+  }
+
+  function locateCardOf(d, cid) {
+    const want = String(cid);
+    const nm = String(pinNameGet(want) || nameCache[want] || charaName(want) || '').trim();
+    const bad = (el) => !!(el && el.closest && el.closest('#tgtk-panel,#tgtk-fab'));
+    const grids = locateGrids(d);
+    for (const host of locateHosts(d)) {
+      try {
+        for (const card of host.querySelectorAll('.item')) {
+          if (bad(card)) continue;
+          const c = pinCardCid(card);
+          if (c && String(c) === want) return card;
+        }
+      } catch (e) {}
+    }
+    if (!grids.length) return null;
+
+    const cards = [];
+    for (const g of grids) {
+      for (const card of g.children) {
+        if (!bad(card)) cards.push({ card, g });
+      }
+    }
+    for (const it of cards) {
+      let c = pinCardCid(it.card);
+      if (!c) {
+        try {
+          const inner = it.card.querySelector('[data-character-id], [data-temple-character-id], [data-id]');
+          if (inner) c = pinCardCid(inner);
+        } catch (e) {}
+      }
+      if (c && String(c) === want) return it.card;
+    }
+    try {
+      const seq = [];
+      const pages = Object.keys(pinPages).map(Number).sort((x, y) => x - y);
+      for (const pg of pages) {
+        const rec = pinPages[pg];
+        if (rec && rec.items) for (const it of rec.items) seq.push(it);
+      }
+      if (seq.length === cards.length) {
+        for (let i = 0; i < cards.length; i++) {
+          const it = seq[i];
+          if (it && String(it.CharacterId) === want) return cards[i].card;
+        }
+      }
+    } catch (e) {}
+    for (const it of cards) {
+      const c = pinCidByCover(pinCoverKey(pinCardCover(it.card)));
+      if (c && String(c) === want) return it.card;
+    }
+    if (nm) {
+      let dup = 0;
+      const all = pinAllGet();
+      if (all) {
+        for (let i = 0; i < all.length; i++) {
+          const o = all[i];
+          if (o && String(o.CharacterName || o.Name || '').trim() === nm) dup++;
+        }
+      }
+      if (dup === 0 || dup === 1) {
+        for (const it of cards) {
+          const el = locateNameOf(it.card);
+          if (el && String(el.textContent || '').trim() === nm) return it.card;
+        }
+      }
+    }
+    return null;
+  }
+
+  function locateScroller(el) {
+    let node = el;
+    for (let i = 0; node && i < 14; i++) {
+      try {
+        if (node.scrollHeight - node.clientHeight > 40) {
+          const view = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+          const oy = view.getComputedStyle(node).overflowY;
+          if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') return node;
+        }
+      } catch (e) {}
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function locateWaitMore(sc, h0, cid) {
+    return new Promise((resolve) => {
+      let n = 0;
+      const t = setInterval(() => {
+        n++;
+        let grew = false;
+        try { grew = sc.scrollHeight > h0 + 4; } catch (e) {}
+        if (grew || n >= 9) {
+          clearInterval(t);
+          let hit = null;
+          try { hit = locateCardOf(HDOC, cid); } catch (e) {}
+          resolve(hit || null);
+        }
+      }, 110);
+    });
+  }
+
+  async function locateFindCard(cid, onStep) {
+    let card = null;
+    try { card = locateCardOf(HDOC, cid); } catch (e) {}
+    if (card) return card;
+    const grid0 = locateGridAny();
+    if (!grid0) return null;
+    const host = grid0.parentElement || grid0;
+    let sc = locateScroller(grid0);
+    if (!sc) {
+      try {
+        for (const el of host.querySelectorAll('div')) {
+          if (el.scrollHeight - el.clientHeight <= 40) continue;
+          const view = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+          const oy = view.getComputedStyle(el).overflowY;
+          if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') { sc = el; break; }
+        }
+      } catch (e) {}
+    }
+    if (!sc) return null;
+    const keep = sc.scrollTop;
+    for (let i = 1; i <= 12; i++) {
+      if (onStep) {
+        try { onStep(i); } catch (e) {}
+      }
+      const h0 = sc.scrollHeight;
+      try { sc.scrollTop = sc.scrollHeight; } catch (e) {}
+      card = await locateWaitMore(sc, h0, cid);
+      if (card) return card;
+    }
+    try { sc.scrollTop = keep; } catch (e) {}
+    return null;
+  }
+
+  function locatePopClose(host) {
+    const pick = (root) => {
+      if (!root || !root.querySelectorAll) return null;
+      try {
+        for (const b of root.querySelectorAll('button')) {
+          const t = String(b.textContent || '').trim().toLowerCase();
+          if (t !== 'close' && t !== '关闭' && t !== '×' && t !== 'x') continue;
+          if (b.getBoundingClientRect().width) return b;
+        }
+      } catch (e) {}
+      return null;
+    };
+    const inHost = pick(host);
+    if (inHost) return inHost;
+    let box = host && host.parentElement;
+    for (let i = 0; i < 3 && box; i++, box = box.parentElement) {
+      const got = pick(box);
+      if (got) return got;
+    }
+    return null;
+  }
+
+  function locateMyAvatar() {
+    for (const d of allDocs()) {
+      let boxes = [];
+      try { boxes = d.querySelectorAll('div,section,header'); } catch (e) { continue; }
+      for (const box of boxes) {
+        let txt = '';
+        try { txt = String(box.textContent || ''); } catch (e) { continue; }
+        if (txt.length > 1500 || txt.indexOf('退出登录') < 0) continue;
+        let av = null;
+        try { av = box.querySelector('[role="button"][aria-label]'); } catch (e) {}
+        if (av && av.getBoundingClientRect().width) return av;
+      }
+    }
+    return null;
+  }
+
+  async function locateReopenPop() {
+    const g0 = locateGridAny();
+    const host = g0 ? (g0.parentElement || g0) : null;
+    if (!host) return false;
+    const avatar = locateMyAvatar();
+    if (!avatar) return false;
+    const close = locatePopClose(host);
+    if (!close) return false;
+    try { close.click(); } catch (e) { return false; }
+    await sleep(520);
+    try { avatar.click(); } catch (e) { return false; }
+    await sleep(1000);
+    try {
+      const tab = locateTempleTab();
+      if (tab) tab.click();
+    } catch (e) {}
+    await sleep(900);
+    return !!locateGridAny();
+  }
+
+  let locatePending = { cid: '', at: 0 };
+  let locatePendingBusy = false;
+  function locatePendingTry() {
+    if (locatePendingBusy) return;
+    if (!locatePending.cid) return;
+    if (Date.now() - locatePending.at > 30000) {
+      locatePending = { cid: '', at: 0 };
+      return;
+    }
+    if (!locateGridAny()) return;
+    locatePendingBusy = true;
+    const id = locatePending.cid;
+    locatePending = { cid: '', at: 0 };
+    const nm = pinNameGet(id) || nameCache[id] || charaName(id) || '#' + id;
+    locateRun(id, nm).then(
+      () => { locatePendingBusy = false; },
+      () => { locatePendingBusy = false; }
+    );
+  }
+
+  function locateBar(show) {
+    const loc = pinLocateGet();
+    const doc = HDOC;
+    let bar = null;
+    try {
+      bar = doc.getElementById('tgtk-locate-bar');
+    } catch (e) {}
+    if (!loc || !show) {
+      if (bar) bar.remove();
+      return;
+    }
+    if (!bar) {
+      bar = h('div', { id: 'tgtk-locate-bar' }, h('span', null, ''), h('button', { type: 'button' }, '取消全部定位'));
+      bar.querySelector('button').addEventListener('click', () => {
+        pinLocateClear();
+        templeLiveRefresh(false);
+        locateRefreshBtns();
+        try { pinToast('已取消全部定位'); } catch (e) {}
+      });
+      try {
+        (doc.body || doc.documentElement).appendChild(bar);
+      } catch (e) {
+        return;
+      }
+    }
+    const n = (loc.cids || []).length;
+    const want = n > 1 ? `已定位 ${n} 座（都在第 1 页最前）` : `已定位 ${n} 座（在第 1 页最前）`;
+    const txt = bar.querySelector('span');
+    if (txt && txt.textContent !== want) txt.textContent = want;
+  }
+
+  function locateNameOf(card) {
+    try {
+      if (card.closest && card.closest('#tgtk-panel,#tgtk-fab')) return null;
+      const old = card.querySelector('.title, .name');
+      if (old && String(old.textContent || '').trim()) {
+        if (!(old.closest && old.closest('#tgtk-panel,#tgtk-fab'))) return old;
+      }
+      const spans = card.querySelectorAll('span');
+      for (let i = spans.length - 1; i >= 0; i--) {
+        const s = spans[i];
+        if (s.closest && s.closest('#tgtk-panel,#tgtk-fab,#tgtk-locate-bar,.tgtk-favpop,.tgtk-sug')) continue;
+        const t = String(s.textContent || '').trim();
+        if (!t || t.length > 24) continue;
+        if (/^\d/.test(t) || /^lv\s*\d/i.test(t) || /^[+\-]/.test(t)) continue;
+        return s;
+      }
+    } catch (e) {}
+    return null;
+  }
+  function locateTick(d) {
+    const loc = pinLocateGet();
+    if (!loc) {
+      if (!locateWasActive) return;
+      locateWasActive = false;
+      locateBar(false);
+      try {
+        d.querySelectorAll('.tgtk-locate-name').forEach((x) => x.classList.remove('tgtk-locate-name'));
+        d.querySelectorAll('.tgtk-locate-hit').forEach((x) => x.classList.remove('tgtk-locate-hit', 'tgtk-locate-done'));
+      } catch (e) {}
+      return;
+    }
+    locateWasActive = true;
+    ensureLocateStyle(d);
+    const list = loc.cids || [];
+    let card = null;
+    for (const cid of list) {
+      let one = null;
+      try { one = locateCardOf(d, cid); } catch (e) {}
+      if (!one) continue;
+      if (!card) card = one;
+      const nmEl = locateNameOf(one);
+      if (nmEl && !nmEl.classList.contains('tgtk-locate-name')) {
+        nmEl.classList.add('tgtk-locate-name');
+        try { nmEl.__tgtkLocateName = 1; } catch (e) {}
+      }
+    }
+    const hasList = locateHasAny();
+    locateBar(hasList || !!card);
+    if (!card) return;
+    const key = list.join(',');
+    if (locateScrolledFor !== key) {
+      locateScrolledFor = key;
+      try {
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch (e) {}
+    }
+  }
+
+  function pinDecorKick() {
+    const now = Date.now();
+    if (now - pinDecorKickAt < 80) return;
+    pinDecorKickAt = now;
+    try { pinDecorTick(true); } catch (e) {}
+  }
+  function pinDecorTick(force) {
+    const now = Date.now();
+    if (!force && now - pinDecorAt < 800) return;
+    pinDecorAt = now;
+    try { locatePendingTry(); } catch (e) {}
+    for (const d of allDocs()) {
+      holdWire(d);
+      try { locateTick(d); } catch (e) {}
       const charaPage = S.gxStarPill ? starPageIsChara(d) : false;
+      let ccid = '';
+      try {
+        if (charaPage) ccid = currentCharacterId();
+      } catch (e) {}
       try {
         if (charaPage) {
-          const ccid = currentCharacterId();
+          if (!ccid) {
+            try {
+              const scope0 = starCharaScope(d);
+              const anyCard = scope0.querySelector('.item[data-id]');
+              const c0 = anyCard && starCardCid(anyCard);
+              if (c0) ccid = c0;
+            } catch (e) {}
+          }
           if (
             ccid &&
             (starCharaCid !== ccid || Date.now() - starCharaAt > 300000) &&
@@ -15947,6 +17722,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           ) {
             starCharaLoad(ccid);
           }
+          const scope = starCharaScope(d);
           const cards = [];
           [
             '.item[data-id]',
@@ -15954,7 +17730,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             '.grail_list > .item',
           ].forEach((sel) => {
             try {
-              d.querySelectorAll(sel).forEach((c) => {
+              scope.querySelectorAll(sel).forEach((c) => {
                 if (cards.indexOf(c) < 0) cards.push(c);
               });
             } catch (e) {}
@@ -15965,6 +17741,22 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             const star = starOfCharaCard(card);
             if (star !== null) starPillPaint(card, star);
           });
+          if (S.gxStarPill) {
+            scope.querySelectorAll('[data-user-name]').forEach((card) => {
+              const cid = pinCardCid(card) || ccid;
+              if (ccid && cid && String(cid) !== String(ccid)) return;
+              const star = starOfCharaCard(card);
+              if (star !== null) starCardPaint(card, star);
+            });
+            scope.querySelectorAll('div.grid.w-full.gap-4').forEach((g) => {
+              const first = g.firstElementChild;
+              if (!first || !first.classList || !first.classList.contains('min-w-0')) return;
+              for (const card of g.children) {
+                const star = starOfCharaCard(card);
+                if (star !== null) starCardPaint(card, star);
+              }
+            });
+          }
         }
       } catch (e) {}
       try {
@@ -16005,6 +17797,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
                 pinCidByCover(pinCoverKey(pinCardCover(card))) ||
                 (okByCount ? pinCidByIndex(g, card) : '');
               if (cid) pinPillFor(card, cid);
+              if (cid && S.gxStarPill) {
+                const star = starForCard(card, cid, charaPage);
+                if (star !== null) starCardPaint(card, star);
+              }
             }
           }
         }
@@ -16414,12 +18210,16 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return null;
   }
 
+  const tgInvestMiss = new WeakMap(); // doc → 这之前别再全页找「已注资」
   function tgWrapInvestAll(d) {
     if (!d || !d.body || !d.createTreeWalker) return;
+    const __ivn = Date.now();
+    if ((tgInvestMiss.get(d) || 0) > __ivn) return;
     let walker = null;
     try { walker = d.createTreeWalker(d.body, 4, null); } catch (e) { return; }
     let n = null;
     let guard = 0;
+    let __hit = 0;
     while ((n = walker.nextNode()) && guard++ < 3000) {
       if (!/已注资/.test(n.nodeValue || '')) continue;
       const p = n.parentElement;
@@ -16430,7 +18230,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const span = tgWrapMoney(p, /[₵¥]\s?[\d,]+(?:\.\d+)?/);
       if (span) tgShareEnter(span, price, String(span.textContent || '').trim());
       if (span) tgShareLeave(span);
+      __hit++;
     }
+    if (!__hit) tgInvestMiss.set(d, __ivn + 10000);
   }
 
   function tgShareSweep(d) {
@@ -16602,6 +18404,28 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     }
     const tick = () => {
       try {
+        if (!GX.pageEver) {
+          if (GX.pageWarm > 0) {
+            GX.pageWarm--;
+          } else {
+            const now = Date.now();
+            if (now - GX.pageAt >= 2000) {
+              GX.pageAt = now;
+              for (const d of allDocs()) {
+                try {
+                  if (d.querySelector(
+                    '#grailBox, [id^="grailBox"], .grail_list, .item[data-id], ' +
+                    '[data-character-id], [id^="tg-"], a[href*="tinygrail.com"]'
+                  )) {
+                    GX.pageEver = true;
+                    break;
+                  }
+                } catch (e) {}
+              }
+            }
+            if (!GX.pageEver) return;
+          }
+        }
         gxStartWatch();
         gxDedupeBoxes(); // 每轮兜底：重复框也可能是懒加载之后才出现的
         gxMountSize(); // 角色页内嵌的圣殿尺寸开关，每轮确认还在
@@ -17075,6 +18899,13 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 #tgtk-panel select{max-width:150px}
 .tgtk-tabs{display:flex;gap:6px}
 .tgtk-ctx[hidden]{display:none}
+.tgtk-ctxchk{margin-top:5px}
+.tgtk-locbtn{flex:none;width:16px;height:16px;padding:0;border:0;border-radius:4px;background:transparent;
+  color:var(--tg-mute);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.tgtk-locbtn svg{display:block}
+.tgtk-locbtn:hover,.tgtk-locbtn:focus{color:var(--tg-accent);background:var(--tg-hit);outline:none}
+.tgtk-locbtn.on{color:#e46fa1;background:rgba(228,111,161,.12)}
+.tgtk-locbtn.on:hover,.tgtk-locbtn.on:focus{background:rgba(228,111,161,.22)}
 .tgtk-actions{justify-content:flex-start}
 .tgtk-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--tg-line);background:var(--tg-surface2);color:var(--tg-fg2);font:inherit;
   font-size:12px;cursor:pointer}
@@ -17110,8 +18941,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   background:var(--tg-surface)}
 .tgtk-row.tgtk-hit{background:var(--tg-hit)}
 .tgtk-main{display:flex;flex-direction:column;min-width:0}
-.tgtk-name{color:var(--tg-link);text-decoration:none;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tgtk-name{color:var(--tg-link);text-decoration:none;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  align-self:flex-start;max-width:100%}
 .tgtk-name:hover{text-decoration:underline}
+.tgtk-namerow{display:flex;align-items:center;gap:4px;min-width:0;max-width:100%}
 .tgtk-sub{color:var(--tg-dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tgtk-val{font-variant-numeric:tabular-nums;color:var(--tg-fg2);white-space:nowrap;font-size:12px}
 .tgtk-val b{color:var(--tg-hl);font-weight:600}
@@ -17549,7 +19382,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.53（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.90（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -17578,7 +19411,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const guardFn = () => { const f = HWIN.__TGTK_AUTOFILL_FN__; if (typeof f === 'function') f(); };
     if (!HWIN.__TGTK_AUTOFILL_GUARD__) {
       HWIN.__TGTK_AUTOFILL_GUARD__ = true;
-      setInterval(guardFn, 600);
+      setInterval(guardFn, 1500);
       const sweep = () => [0, 120, 500, 1500, 3000].forEach((ms) => setTimeout(guardFn, ms));
       sweep();
       try { HWIN.addEventListener('load', sweep); } catch (e) {}
@@ -17622,7 +19455,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.53', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.90', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
         starPillPaint, starPillRestore,
@@ -17630,6 +19463,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         starOfCharaCard,
         starCardCid,
         starPageIsChara: (d) => starPageIsChara(d || document),
+        starCharaScope: (d) => starCharaScope(d || document),
         starNumNode: (card, box) => starNumNode(card, box || pinCoverBox(card) || card),
         starCharaSeed: (rows) => {
           for (const k in starCharaByUid) delete starCharaByUid[k];
@@ -17643,6 +19477,26 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           starCharaAt = Date.now();
           starCharaFailAt = 0;
         },
+        starBadgeRemove, starForCard, starCardPaint,
+        holdBadgeOf, holdRankOf, holdNameOf, holdShow, holdRestore, holdCardOf,
+        holdClickTarget, holdNameDirect,
+        holdSeed: () => {
+          for (const k in holdListCache) delete holdListCache[k];
+          for (const k in holdNumCache) delete holdNumCache[k];
+        },
+        gxPageState: () => ({ ever: !!GX.pageEver, warm: GX.pageWarm, at: GX.pageAt }),
+        gxPageReset: () => {
+          GX.pageEver = false;
+          GX.pageWarm = 0;
+          GX.pageAt = 0;
+        },
+        pinLocateGet, pinLocateSet, pinLocateClear, pinLocateHas, pinOrdered, pinOn, locateTick, locateCardOf,
+        locateRefreshBtns, templeLiveRefresh, templeLiveOld, locateCurrentPage, pinToggle, botToggle, gcApplyOld,
+        locateFindCard, locateHosts, locateReopenPop, locateRun,
+        locateGrids, locateGridAny, locateCardAny, locateHasAny,
+        pinPageCids: (pg) => (pinPages[pg] && pinPages[pg].items ? pinPages[pg].items.map((x) => String(x.CharacterId)) : null),
+        pinAllReset: () => { pinAll.at = 0; pinAll.items = null; pinAll.busy = null; pinAll.failAt = 0; pinAll.user = ''; },
+        pinLists: () => ({ pins: pinList(), bots: botList(), on: !!TUI.on }),
       };
     }
   } catch (e) {}

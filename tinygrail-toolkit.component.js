@@ -9,6 +9,14 @@
  *      · 一次最多画 300 行（九千行 DOM 会把页面和工具箱一起卡死），统计与「复制」仍按全部算
  *      · **筛选前提：固定资产上限 ≥ 500 才算建成 1 级圣殿**；上限 < 500 的未建成塔
  *        在扫描完就剔除，不进列表 / 统计 / 复制，统计行会写明排除了几座
+ *      · 「当前角色 / 角色列表」会并上 chara/links：chara/temple 不返回已 LINK 的塔，
+ *        只读它就会漏掉这些塔（并完之后与角色页的 LINK 圣殿 + 圣殿网格一致，按 Id 去重）
+ *      · 这两种源还会并上「我的塔」里属于该角色的塔：固资 < 250 的损坏塔站点判定为无效，
+ *        chara/temple / 角色页都不返回，只有 chara/user/temple 有 —— 不并进来就会出现
+ *        「我的塔能筛出来、角色列表却筛不出来」。用置顶那条 5 分钟全量队列，不额外拉请求；
+ *        读不到「我的塔」时统计行会写「我的塔没读到」，不会静默少几座塔
+ *      · 角色列表多一个「只筛自己圣殿」勾选：只留下塔主是我的塔，可以当「搜自己的圣殿」用
+ *        （塔主用户名 / 昵称 / uid 任一命中即算；身份从本地缓存拿，拿不到才问一次接口）
  *      · 筛塔 / 持股 / 收藏的「复制」统一只导出角色数字 ID（空格分隔、去重），
  *        可直接粘进收藏的「手动添加」或角色筛选框；收藏只导当前打开的收藏夹
  *        （选「全部收藏夹」时按角色去重）
@@ -85,6 +93,7 @@
  *        按缺口一次性补钱；补完即关掉计划并记下结论，刷新不会重复注资
  *      + 计划（ICO id / 角色 id / 结束时间 / 目标等级）存本机：关掉小圣杯页、切到别的
  *        bgm 页面、重开浏览器后都还在，只要任意一个 bgm 页面开着就会继续执行；
+ *        **关机 / 关掉浏览器就一定不执行** —— 脚本跑在浏览器里，没有服务端在盯；
  *        结束时间过了还没处理的，会核对一次服务端——真结束就记「错过」，被延期就继续等
  *      + 等级按官方规则推算（扣 50 万税后资金 ≥ n(n+1)(2n+1)/6×10 万，且人数 ≥ 10+5n）
  *      + 「目标 LvN」右边直接写出「上市 LvX」：ICO 等级与上市后的角色等级不再一一对应
@@ -188,6 +197,19 @@
  *        「小」的 6 列额外挂在 <html> 的持久 class 上；DOM 观察器发现圣殿列表被
  *        整块换掉时**当场同步**补尺寸标记（不再 setTimeout 到下一帧），重绘不闪
  *      + 收藏星标挂到小圣杯自带的「收藏」按钮右边
+ *      + 新版圣殿卡的星之力也写在站点自己的收益率胶囊里（右下角那枚「+9.75」，
+ *        旁边那枚不带正负号的胶囊不动；没有收益率的塔也照样有这枚胶囊），
+ *        颜色和旧版同一套（紫 ≥1 万 / 黄 / 灰），两边都是圆角，z-index 压在
+ *        GIF 贴图覆盖层之上，贴过封面也看得见；贴到卡片右边会往回挪一点，不会被裁；
+ *        角色浮窗（在 /rakuen 之类页面点开的那种）按角色页同样处理
+ *      + 角色页 / 角色浮窗的董事会只公开前 3 名的持股，其余**点一下**「???」现查这一位的持股：
+ *        卡片按三个条件同时定界（出现第二个用户名 / 第二枚 ??? / 文字超过 200 字就停），
+ *        只认「整格只有一个 /user/{用户名}」的链接去查 chara/user/{cid}/{用户名}/false 的 Total；
+ *        没有链接就翻 chara/users 名单，且昵称必须唯一命中，命中多个宁可不显示
+ *        —— 认大了会把整块董事会第一个人（主席）的持股糊到每个人身上；
+ *        显示成「64,019 72.74%」（股数 + 占角色总股本的比例，和 tinygrail-magic 一样），
+ *        再点一下收起原样；旧版写的「-- ??%」（两个问号）同样认。
+ *        不用悬停：浮窗里卡片会重排、胶囊里还套着小字，enter/leave 收不干净
  *  13) 塔图工具箱（新旧版通用）：自己的塔只挂「自由裁剪」，别人的塔只挂「复制 / 修改」
  *      + 图片图标按钮打开自建裁剪浮层：固定 3:4 竖图，可拖框 / 拉角 / 滑杆缩放、
  *        本地选图或粘贴地址；默认「原图画质」按裁剪框的原图分辨率导出，PNG 走无损、
@@ -282,6 +304,8 @@
  *        入口在「圣殿」页「无缝 link 图」和「个人页圣殿置顶」之间，平时收成一行、点开才是配置；
  *        只填角色名 / ID 添加，不分顺序、不需要在个人页卡片上挂按钮，每行右侧一个「取消置底」。
  *        置底名单同样跟着同步码 / 云同步走；同一个角色不会既置顶又置底（置顶优先）。
+ *      + 置顶 / 置底的输入框右侧都有 ★：从收藏夹里点一个就直接置顶 / 置底一个
+ *        （不用回输入框再确认，浮层不关、可连着点；没有我的塔的会被拦下来并提示）
  *      + 角色候选（所有联想框）：完全同名的排最前，其次「以关键字开头」，再次「包含关键字」；
  *        同一档里等级高的排前。官方搜索接口会漏角色（如 #23425「白」）、且常在单字查询时
  *        把 Level 给成 0 或干脆不给，所以本机已知角色（当前页标题 / 持仓 / 收藏 / 名字缓存）
@@ -312,7 +336,7 @@
  *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.53（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.90（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -494,6 +518,8 @@
     filAssets: true,
     filCover: false,
     cover: 'default',
+    // 角色列表模式：只留下自己的圣殿（当「搜自己圣殿」用）
+    onlyMine: false,
     // 持股筛选（只查自己；holdQuery 是「按角色名 / ID 搜索」框的内容）
     holdQuery: '',
     lvMin: '',
@@ -751,6 +777,27 @@
   let favNameLoading = false;
   const favNameTried = new Set();
   const nameCache = Object.create(null);
+  /* 角色名缓存落盘：刷新后筛塔第一眼就是名字，不会先闪一下 #7998 再变回来。
+     只存「ID → 名字」，1.5 秒合并写一次，别把 localStorage 写爆。 */
+  const LS_NAMES = 'tgtk:names:v1';
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_NAMES) || 'null');
+    if (o && typeof o === 'object') {
+      Object.keys(o).forEach((k) => {
+        if (/^\d+$/.test(k) && o[k] && typeof o[k] === 'string') nameCache[k] = o[k];
+      });
+    }
+  } catch (e) {}
+  let nameSaveTimer = 0;
+  function nameCacheSave() {
+    if (nameSaveTimer) return;
+    nameSaveTimer = setTimeout(() => {
+      nameSaveTimer = 0;
+      try {
+        localStorage.setItem(LS_NAMES, JSON.stringify(nameCache));
+      } catch (e) {}
+    }, 1500);
+  }
   const totalCache = Object.create(null); // 角色ID -> 总股本（等级进度用）
   const metaTried = new Set(); // 已尝试拉过 meta 的角色ID，避免反复请求
   let snaps = []; // 每日资产快照 [{d:'YYYY-MM-DD', cc, mv}]
@@ -2441,6 +2488,8 @@
     hideCharaSuggest();
     favPopBtn = btn;
     const multi = !!(opts && opts.multi);
+    // onPick：置顶 / 置底那种「点一下就直接加进名单」的用法，不走输入框
+    const onPick = opts && typeof opts.onPick === 'function' ? opts.onPick : null;
     const pop = h('div', { class: 'tgtk-favpop', 'data-theme': S.theme === 'light' ? 'light' : 'dark' });
     favPop = pop;
 
@@ -2457,11 +2506,15 @@
     fillFolderSel();
     const search = h('input', { type: 'text', autocomplete: 'off', placeholder: '搜收藏的角色名 / ID' });
     const list = h('div', { class: 'tgtk-favpoplist' });
-    const footTxt = h('span', null, multi ? '可连续点多个角色（点一下追加一个）' : '点一下填入左侧输入框');
+    const footTxt = h(
+      'span',
+      null,
+      onPick ? '点一下直接加入，可连续点' : multi ? '可连续点多个角色（点一下追加一个）' : '点一下填入左侧输入框'
+    );
     const foot = h('div', { class: 'tgtk-favfoot' }, footTxt, done);
 
     const chosen = new Set(
-      multi
+      multi && !onPick
         ? String(inp.value || '')
             .trim()
             .split(/[\s,，、]+/)
@@ -2518,6 +2571,19 @@
             );
             row.addEventListener('mousedown', (e) => e.preventDefault());
             row.addEventListener('click', () => {
+              // 置顶 / 置底：点一下就直接加，浮层不关，可以接着点下一个
+              if (onPick) {
+                const after = (ok) => {
+                  if (ok === false) return;
+                  chosen.add(x.id);
+                  footTxt.textContent = `已选 ${chosen.size} 个，可继续点`;
+                  render();
+                };
+                const r = onPick(x.id, x);
+                if (r && typeof r.then === 'function') r.then(after).catch(() => {});
+                else after(r);
+                return;
+              }
               applyFavPick(inp, x.id, multi);
               if (!multi) {
                 hideFavPop();
@@ -2569,8 +2635,8 @@
   }
 
   /** 小星星按钮：接在角色输入框右边，点开收藏夹 */
-  function favBtn() {
-    return h('button', { class: 'tgtk-favbtn', type: 'button', title: '从收藏夹选角色' }, '★');
+  function favBtn(title) {
+    return h('button', { class: 'tgtk-favbtn', type: 'button', title: title || '从收藏夹选角色' }, '★');
   }
 
   /** 多目标输入框最右边的「清空」：清掉文本并触发一次 input，让上层状态跟着归零 */
@@ -2717,7 +2783,18 @@
    *  新版小圣杯是「弹窗式」角色详情，关掉的弹窗常留在 DOM 里（display:none），
    *  而且弹窗挂在 body 末尾 —— 直接取第一个 [data-character-id] 会认到上一个角色。
    *  所以优先看「可见的最后一个角色弹窗」，其次才是页面里固定的角色盒。 */
+  let curCidAt = 0;
+  let curCidVal = '';
+  /** 同一次 tick 里会被调用十几次，每次都扫全文档；250ms 内复用结果。 */
   function currentCharacterId() {
+    const __now = Date.now();
+    if (curCidVal && __now - curCidAt < 250) return curCidVal;
+    const __v = currentCharacterIdSlow();
+    curCidAt = __now;
+    curCidVal = __v ? String(__v) : '';
+    return __v;
+  }
+  function currentCharacterIdSlow() {
     // 1) 新版角色弹窗（最后打开的那个优先）
     for (const d of allDocs()) {
       let modals = [];
@@ -2862,6 +2939,7 @@
         });
         (arr || []).forEach((c) => {
           nameCache[String(c.Id)] = c.Name;
+          nameCacheSave();
           if (c.Total !== undefined && c.Total !== null) totalCache[c.Id] = num(c.Total);
           // 顺便记下权威等级，联想框不用再为这些角色单独发一次反查
           if (c.Level != null) charaLvCache[String(c.Id)] = num(c.Level);
@@ -2947,15 +3025,73 @@
   const TEMPLE_MIN_CAP = 500;
   const templeBuilt = (t) => !!t && num(t.Sacrifices) >= TEMPLE_MIN_CAP;
   let templeExcluded = 0; // 本轮扫描里被排除的未建成塔数量
+  let templeExcludedMine = 0; // 其中属于我的（勾「只筛自己圣殿」时用它，别把别人的算进来）
 
   function dedupe(list) {
     const seen = new Set();
     return list.filter((t) => {
-      if (!t || seen.has(t.Id)) return false;
-      seen.add(t.Id);
+      if (!t) return false;
+      // 主键仍按 Id（temple 与 links 之间久经验证），Id 缺了才退回「角色 + 塔主」。
+      // 不能用「角色 + 塔主」当主键：links 里可能带对端条目，会把两座不同的塔并成一座。
+      const k = String(t.Id || (String(t.CharacterId) + '|' + String(t.UserId)));
+      if (seen.has(k)) return false;
+      seen.add(k);
       return true;
     });
   }
+
+  /* ---- 「只筛自己圣殿」：判断一座塔是不是我的 ---- */
+  /** 塔对象里 Name = 塔主用户名、Nickname = 塔主昵称、UserId = 塔主 uid，
+   *  三个任一命中就算我的。身份优先从本地缓存 / 页面徽章拿，拿不到再问一次接口。 */
+  const mineKeys = { names: [], uid: '', at: 0, asked: 0 };
+  let mineLoadFailed = false; // 「我的塔」没读到：统计行要提示，别让玩家以为塔不见了
+  async function loadMineKeys(force) {
+    if (!force && mineKeys.at && Date.now() - mineKeys.at < 600000) return mineKeys;
+    const add = (x) => {
+      const s = String(x || '').trim().toLowerCase();
+      if (s && !mineKeys.names.includes(s)) mineKeys.names.push(s);
+    };
+    add(selfKeyCache);
+    add(guessedUsername());
+    try {
+      const o = JSON.parse(HWIN.localStorage.getItem('tinygrail:user-assets') || '0') || {};
+      if (o && typeof o === 'object') {
+        mineKeys.uid = mineKeys.uid || String(o.Id || o.id || '');
+        add(o.Name || o.name);
+        add(o.Nickname || o.nickname);
+      }
+    } catch (e) {}
+    if (TGT.me && TGT.me.id) {
+      mineKeys.uid = mineKeys.uid || String(TGT.me.id);
+      add(TGT.me.name);
+    }
+    // 本地什么都没读到（未登录 / 组件在 iframe 里）才发一次接口；没认出来时隔 30 秒可重试
+    if ((!mineKeys.names.length || !mineKeys.uid) && Date.now() - mineKeys.asked > 30000) {
+      mineKeys.asked = Date.now();
+      try {
+        const v = await api('chara/user/assets/0/true');
+        if (v) {
+          mineKeys.uid = String(v.Id || v.id || mineKeys.uid || '');
+          add(v.Name || v.name);
+          add(v.Nickname || v.nickname);
+        }
+      } catch (e) {}
+    }
+    if (mineKeys.names.length || mineKeys.uid) mineKeys.at = Date.now();
+    return mineKeys;
+  }
+  const templeIsMine = (t) => {
+    if (!t) return false;
+    // 「我的塔」接口并进来的：连站点隐藏的损坏塔（固资 < 250）也算我的
+    if (t.__mine) return true;
+    if (mineKeys.uid && String(t.UserId || '') === mineKeys.uid) return true;
+    const nm = String(t.Name || '').trim().toLowerCase();
+    if (nm && mineKeys.names.includes(nm)) return true;
+    const nk = String(t.Nickname || '').trim().toLowerCase();
+    return !!(nk && mineKeys.names.includes(nk));
+  };
+  /** 只有「角色列表」模式才提供这个勾选（其它模式用不上，也避免误以为筛掉了东西） */
+  const templeUseMine = () => S.source === 'chars' && !!S.onlyMine;
 
   /**
    * 塔图是不是「没换过」。
@@ -2970,12 +3106,113 @@
     return { isDefault: false, cover: c };
   }
 
+  /**
+   * 一个角色的全部圣殿：chara/temple 为主（未登录之类要照原样报错），
+   * chara/links 补上已 LINK 的塔（那一路失败就跳过，不能连累主列表）。
+   * 和角色页的「LINK 圣殿 + 圣殿网格」对得上，按 Id 去重后正好一份。
+   */
+  async function templeListWithLinks(cid) {
+    const out = [];
+    const seen = Object.create(null);
+    const push = (t) => {
+      if (!t) return;
+      const k = String(t.Id || (String(t.CharacterId) + '|' + String(t.UserId)));
+      if (seen[k]) return;
+      seen[k] = 1;
+      // 个别 links 条目不回 CharacterId：补上当前扫描的角色，免得这一行的名字 / 复制出来的 ID 变成空的
+      out.push(t.CharacterId ? t : Object.assign({}, t, { CharacterId: cid }));
+    };
+    const main = await api('chara/temple/' + cid);
+    (Array.isArray(main) ? main : (main && main.Items) || []).forEach(push);
+    try {
+      const lk = await api('chara/links/' + cid);
+      (Array.isArray(lk) ? lk : (lk && lk.Items) || []).forEach(push);
+    } catch (e) {}
+    return out;
+  }
+
+  /**
+   * 我的全部圣殿，按角色 ID 分桶。
+   * 为什么需要：固资 < 250 的塔被站点判成「已损坏」，chara/temple/{cid} 直接不返回它，
+   * 但 chara/user/temple（「我的塔」）里有 —— 不并进来就会出现「我的塔筛得出来、
+   * 当前角色 / 角色列表却筛不出来」的怪事。
+   * 复用置顶那条 5 分钟缓存的全量队列，反复扫描不会每次都拉一万条。
+   */
+  async function mineTemplesByCid(cids) {
+    const out = new Map();
+    const want = new Set((cids || []).map((x) => String(x)));
+    let all = null;
+    try { all = await pinAllLoad(); } catch (e) { all = null; }
+    // null = 没读到（未登录 / 请求失败）；空数组 = 确实没有塔，两者不能混
+    if (!all) { mineLoadFailed = true; return out; }
+    if (!all.length) return out;
+    const meName = String(selfKeyCache || guessedUsername() || '');
+    const meId = String((TGT.me && TGT.me.id) || '');
+    all.forEach((t) => {
+      if (!t) return;
+      const cid = String(t.CharacterId || '');
+      if (!cid || (want.size && !want.has(cid))) return;
+      // 这个接口的 Name 是**角色名**，塔主是我自己：补一份塔主字段，
+      // 列表里才不会把角色名当成塔主名显示
+      const one = Object.assign({}, t, {
+        __mine: true,
+        UserId: t.UserId || meId,
+        Name: meName || '我',
+        Nickname: meName || '我',
+      });
+      if (!out.has(cid)) out.set(cid, []);
+      out.get(cid).push(one);
+    });
+    return out;
+  }
+
   async function collectTemples() {
+    // 先定这次要扫哪些角色：两种按角色扫的源都要用（「我的塔」不需要补）
+    const targets = [];
+    let curId = '';
     if (S.source === 'current') {
-      const id = currentCharacterId();
-      if (!id) throw new Error('没检测到当前角色，请打开角色页，或换用「我的塔 / 角色列表」');
-      setTempleStatus('读取角色 #' + id + ' 的塔…');
-      return await api('chara/temple/' + id);
+      curId = currentCharacterId();
+      if (!curId) throw new Error('没检测到当前角色，请打开角色页，或换用「我的塔 / 角色列表」');
+      targets.push(String(curId));
+    } else if (S.source === 'chars') {
+      (S.chars || '')
+        .split(/[\s,，、]+/)
+        .map((x) => x.trim())
+        .filter((x) => /^\d+$/.test(x))
+        .forEach((x) => targets.push(x));
+      if (!targets.length) throw new Error('请填写至少一个角色 ID');
+    }
+
+    // 站点把固资 < 250 的塔判成「已损坏」，chara/temple 不返回它们（角色页也不画），
+    // 但「我的塔」接口里有 —— 一次备好这次要扫的角色，免得换个入口就少几座塔。
+    let mineMap = null;
+    if (targets.length) {
+      setTempleStatus('读取我的圣殿（补上站点隐藏的损坏塔）…');
+      mineMap = await mineTemplesByCid(targets);
+    }
+    const withMine = (cid, arr) => {
+      const list = (arr || []).slice();
+      const mine = mineMap ? mineMap.get(String(cid)) || [] : [];
+      mine.forEach((t) => {
+        // temple / links 里已经有这座塔（同一角色 + 同一塔主）就别再加：
+        // 「我的塔」只用来补站点隐藏的那些，不是把已有的再列一遍。
+        // 这里不靠 Id 比较，是因为两个接口的 Id 未必同一套。
+        const dup = list.some(
+          (x) =>
+            String(x.CharacterId || '') === String(t.CharacterId || '') &&
+            String(x.UserId || '') !== '' &&
+            String(x.UserId) === String(t.UserId)
+        );
+        if (!dup) list.push(t);
+      });
+      return list;
+    };
+
+    if (S.source === 'current') {
+      setTempleStatus('读取角色 #' + curId + ' 的塔…');
+      // chara/temple 不返回已 LINK 的塔（它们挂在 chara/links 里），两路并起来
+      // 才是角色页上「LINK 圣殿 + 圣殿网格」包含的全部圣殿
+      return withMine(curId, await templeListWithLinks(curId));
     }
 
     if (S.source === 'user') {
@@ -3011,18 +3248,15 @@
       return out;
     }
 
-    const ids = (S.chars || '')
-      .split(/[\s,，、]+/)
-      .map((x) => x.trim())
-      .filter((x) => /^\d+$/.test(x));
-    if (!ids.length) throw new Error('请填写至少一个角色 ID');
-
+    // 角色列表：targets 在函数开头已经解析并校验过了
+    const ids = targets;
     const out = [];
     for (let i = 0; i < ids.length; i++) {
       if (!busy) break;
       setTempleStatus(`扫描角色 ${i + 1} / ${ids.length}（#${ids[i]}）…`);
       try {
-        const arr = await api('chara/temple/' + ids[i]);
+        // 同样并上 LINK 塔（chara/temple 不含已连接的）和我的塔里被站点隐藏的损坏塔
+        const arr = await withMine(ids[i], await templeListWithLinks(ids[i]));
         if (Array.isArray(arr)) out.push(...arr);
       } catch (e) {}
       await sleep(180);
@@ -3036,6 +3270,8 @@
     setButtonsDisabled(true);
     templeAll = [];
     templeExcluded = 0;
+    templeExcludedMine = 0;
+    mineLoadFailed = false;
     templeNameTried = Object.create(null);
     els.templeList.textContent = '';
     try {
@@ -3044,12 +3280,23 @@
       const all = dedupe(Array.isArray(data) ? data : []);
       templeAll = all.filter(templeBuilt);
       templeExcluded = all.length - templeAll.length;
+      // 不管勾没勾「只筛自己圣殿」，都要知道我是谁：筛塔行里的「定位」只挂在自己的塔上。
+      // loadMineKeys 有 10 分钟缓存，正常情况下只是读一下本地缓存。
+      if (templeUseMine()) setTempleStatus('正在确认你的账号…');
+      await loadMineKeys();
+      if (templeUseMine()) {
+        // 排除数也只算我的：不然勾了「只筛自己」还报一堆别人的未建成塔，看不懂
+        templeExcludedMine = all.filter((t) => !templeBuilt(t) && templeIsMine(t)).length;
+      }
       // 先把列表画出来：名字缺的几行再异步补（以前是等全部名字读完才渲染，
       // 九千座塔光名字就要几十批请求，面板一直白屏）
       renderTemples();
+      // 存一份：刷新页面后自动恢复，不用重新扫（参数变了会自动失效）
+      templeScanSave();
       if (!templeAll.length) {
-        setTempleStatus(templeExcluded
-          ? `只找到 ${fmt(templeExcluded)} 座未建成塔（上限 < ${TEMPLE_MIN_CAP}），已全部排除`
+        const exc = templeUseMine() ? templeExcludedMine : templeExcluded;
+        setTempleStatus(exc
+          ? `只找到 ${fmt(exc)} 座未建成塔（上限 < ${TEMPLE_MIN_CAP}），已全部排除`
           : '没有读到塔（该角色可能还没有人建塔）');
       }
     } catch (err) {
@@ -3064,11 +3311,14 @@
   const templeUseAssets = () => S.filAssets !== false;
   const templeUseCover = () => !!S.filCover;
 
-  function templeRows() {
+  /** 「只筛自己圣殿」时的底表：勾了才过滤，没勾就是扫描到的全部 */
+  const templePool = () => (templeUseMine() ? templeAll.filter(templeIsMine) : templeAll);
+
+  function templeRows(poolArg) {
     const key = S.field;
     const useA = templeUseAssets();
     const useC = templeUseCover();
-    const rows = templeAll.filter((t) => {
+    const rows = (poolArg || templePool()).filter((t) => {
       if (!templeBuilt(t)) return false; // 硬前提：兜一层，别让别处塞进来的未建成塔混进结果
       if (useA && !(num(t[key]) < num(S.threshold))) return false;
       if (useC) {
@@ -3085,32 +3335,513 @@
   const TEMPLE_RENDER_MAX = 300;
   let templeNameTried = Object.create(null);
 
+  /* ---- 扫描结果缓存：刷新后不用重新扫 ---- */
+  const LS_TSCAN = 'tgtk:templescan:v1';
+  const TSCAN_TTL = 30 * 60 * 1000;
+  /** 存这次扫描的结果 + 当时的参数。只存必要字段，别把整份接口对象塞进 localStorage。 */
+  function templeScanSave() {
+    if (!templeAll.length) return;
+    try {
+      const items = templeAll.map((t) => ({
+        Id: t.Id,
+        CharacterId: t.CharacterId,
+        CharacterName: t.CharacterName,
+        UserId: t.UserId,
+        Name: t.Name,
+        Nickname: t.Nickname,
+        Assets: t.Assets,
+        Sacrifices: t.Sacrifices,
+        Level: t.Level,
+        Cover: t.Cover,
+        CharacterLevel: t.CharacterLevel,
+        LinkId: t.LinkId,
+        m: t.__mine ? 1 : 0,
+      }));
+      localStorage.setItem(
+        LS_TSCAN,
+        JSON.stringify({
+          at: Date.now(),
+          source: S.source,
+          chars: S.chars,
+          username: S.username,
+          items,
+          excluded: templeExcluded,
+        })
+      );
+    } catch (e) {}
+  }
+  /** 恢复上次的扫描结果；参数变了 / 过期了就不恢复（返回 false）。 */
+  function templeScanRestore() {
+    let o = null;
+    try {
+      o = JSON.parse(localStorage.getItem(LS_TSCAN) || 'null');
+    } catch (e) {
+      return false;
+    }
+    if (!o || !Array.isArray(o.items) || !o.items.length) return false;
+    if (Date.now() - num(o.at) > TSCAN_TTL) return false;
+    if (String(o.source) !== String(S.source)) return false;
+    if (String(o.chars || '') !== String(S.chars || '')) return false;
+    if (String(o.username || '') !== String(S.username || '')) return false;
+    const out = [];
+    o.items.forEach((t) => {
+      if (!t || !t.CharacterId) return;
+      if (t.m) t.__mine = true;
+      out.push(t);
+    });
+    if (!out.length) return false;
+    templeAll = out;
+    templeExcluded = num(o.excluded);
+    return true;
+  }
+
+  /** 定位按钮的图标：标准「定位图钉」（内联 SVG，不依赖外部图标库） */
+  function locatePinIcon() {
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = HDOC.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '13');
+    svg.setAttribute('height', '13');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2.2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    const p = HDOC.createElementNS(ns, 'path');
+    p.setAttribute('d', 'M12 21.6s7-6.4 7-11.3A7 7 0 0 0 5 10.3c0 4.9 7 11.3 7 11.3z');
+    svg.appendChild(p);
+    const c = HDOC.createElementNS(ns, 'circle');
+    c.setAttribute('cx', '12');
+    c.setAttribute('cy', '10');
+    c.setAttribute('r', '2.5');
+    c.setAttribute('fill', 'currentColor');
+    c.setAttribute('stroke', 'none');
+    svg.appendChild(c);
+    return svg;
+  }
+
+  /** 筛塔里点「定位」：把这座塔**临时排到个人圣殿页第 1 页最前面**（可以同时定位多座）。
+   *
+   *  做法和置顶同源（数据层）：全量队列排出新顺序 → 改写 chara/user/temple 的分页响应
+   *  → 用分页器「跳至」输入框 + 回车逼站点重拉第 1 页（点页码对当前页会被去重，回车必定触发）
+   *  → 等 DOM 真画出那张卡，再标粉 + 滚到视野里。**名单一个字都不改**，取消了才恢复。
+   *
+   *  为什么不去弹站点那个塔图浮窗：浮窗是组件内部的局部状态（showTempleModal /
+   *  templeModalData），只能点那张卡的 #tg-temple-image 触发，没有按 id 打开的入口；
+   *  排到第一个之后用户自己点一下最省事。 */
+  function locateGo(cid) {
+    const id = String(cid || '');
+    if (!/^\d+$/.test(id)) return;
+    locatePending = { cid: '', at: 0 };
+    const nm = pinNameGet(id) || nameCache[id] || charaName(id) || '#' + id;
+    setTempleStatus('正在定位 ' + nm + '…');
+    locateRun(id, nm).catch((e) => setTempleStatus('定位失败：' + (e && e.message ? e.message : e)));
+  }
+
+  /** 每页几座：从我们记下的响应里取（站点默认 24），取不到就按 24 */
+  function locatePageSize() {
+    let best = 0;
+    try {
+      for (const p in pinPages) {
+        const rec = pinPages[p];
+        const n = rec && rec.items ? rec.items.length : 0;
+        if (n > best && n < 200) best = n;
+      }
+    } catch (e) {}
+    return best || 24;
+  }
+
+  /** 当前这一页的分页控件：从网格往上找同一层的 #tg-pagination
+   *  （别的 tab 也有同名 id，别拿错，否则会去翻别人的列表） */
+  function locatePagerOf(grid) {
+    try {
+      let box = grid && grid.parentElement;
+      for (let i = 0; i < 3 && box; i++, box = box.parentElement) {
+        const pager = box.querySelector('#tg-pagination');
+        if (pager) return pager;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /** 翻到第 n 页：分页只显示 7 个按钮，目标不在窗口里就先点最后一个数字把窗口滑过去。
+   *  点页码会走站点的 getUserTemples(user, page) —— 正好过我们改写响应的钩子。 */
+  async function locateGotoPage(n) {
+    for (let round = 0; round < 5; round++) {
+      const grid = locateGridAny();
+      const pager = locatePagerOf(grid);
+      if (!pager) return false;
+      const btns = Array.prototype.slice.call(pager.querySelectorAll('button'));
+      let hit = null;
+      let last = null;
+      for (const b of btns) {
+        const t = String(b.textContent || '').trim();
+        if (t === String(n)) { hit = b; break; }
+        if (/^\d+$/.test(t)) last = b;
+      }
+      if (hit) {
+        if (hit.disabled) return true; // 已经在这一页
+        try { hit.click(); } catch (e) { return false; }
+        await sleep(750);
+        return true;
+      }
+      if (!last) return false;
+      try { last.click(); } catch (e) { return false; }
+      await sleep(750);
+    }
+    return false;
+  }
+
+  /** 个人浮窗的 tab：站点默认停在「N组连接」（activeTab = 0），
+   *  不切到「N座圣殿」的话根本没有圣殿网格，自然找不到卡 */
+  function locateTempleTab() {
+    for (const d of allDocs()) {
+      let tabs = [];
+      try { tabs = d.querySelectorAll('[role="tab"]'); } catch (e) { continue; }
+      for (const t of tabs) {
+        if (/座圣殿/.test(String(t.textContent || ''))) return t;
+      }
+    }
+    return null;
+  }
+
+  async function locateEnsureTempleTab() {
+    if (locateGridAny()) return true;
+    const tab = locateTempleTab();
+    if (!tab) return false;
+    try { tab.click(); } catch (e) { return false; }
+    for (let i = 0; i < 6; i++) {
+      await sleep(350);
+      if (locateGridAny()) return true;
+    }
+    return false;
+  }
+
+  /** 用分页器的「跳至」输入框 + 回车逼站点重新请求这一页。
+   *  （圣殿增强那套：回车必定触发；点页码对「当前页」会被站点去重，所以要用输入框） */
+  function locateKickReload(page) {
+    const grid = locateGridAny();
+    if (!grid) return false;
+    let pager = null;
+    try { pager = locatePagerOf(grid); } catch (e) {}
+    if (!pager) return false;
+    const want = String(page || 1);
+    const input = pager.querySelector('input[type="number"], input[type="text"]');
+    if (input) {
+      try {
+        input.value = want;
+        input.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true,
+        }));
+        return true;
+      } catch (e) {}
+    }
+    // 退路：点页码按钮
+    try {
+      for (const b of pager.querySelectorAll('button')) {
+        if (String(b.textContent || '').trim() !== want) continue;
+        if (!b.disabled) { b.click(); return true; }
+        return true; // 已经在这一页
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  /** 现在停在第几页：站点给「当前页」的按钮带 bgm-bg 这个类；
+   *  认不出来就拿第一张卡的 cid 去我们记下的分页响应里对号（每页切片不重叠，不会认错）。 */
+  function locateCurrentPage() {
+    const grid = locateGridAny();
+    const pager = grid ? locatePagerOf(grid) : null;
+    if (pager) {
+      try {
+        const act = pager.querySelector('button.bgm-bg');
+        const n = act ? parseInt(String(act.textContent || '').trim(), 10) : 0;
+        if (n > 0) return n;
+      } catch (e) {}
+    }
+    try {
+      const c0 = grid && grid.children && grid.children[0];
+      if (!c0) return 0;
+      const inner = c0.querySelector('[data-character-id]');
+      const cid = pinCardCid(c0) || (inner ? pinCardCid(inner) : '');
+      if (!cid) return 0;
+      for (const p in pinPages) {
+        const rec = pinPages[p];
+        const first = rec && rec.items && rec.items[0];
+        if (first && String(first.CharacterId) === String(cid)) return Number(p) || 0;
+      }
+    } catch (e) {}
+    return 0;
+  }
+
+  /** 圣殿列表外面那个能滚的盒子（站点翻页后会 smooth 滚到顶，我们要能还原） */
+  function locateScrollBox(grid) {
+    try {
+      let el = grid && grid.parentElement;
+      for (let i = 0; i < 10 && el && el !== el.ownerDocument.body; i++, el = el.parentElement) {
+        if (el.classList && el.classList.contains('overflow-auto')) return el;
+        const cs = el.ownerDocument.defaultView.getComputedStyle(el);
+        if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight + 4) return el;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /** 置顶 / 置底 / 调顺序之后当场重排一遍圣殿列表，不用用户自己刷新。
+   *  - 没开个人圣殿页时是无害的空操作（只读一次 DOM 判断）
+   *  - 置顶且人在第 1 页：留在第 1 页并让站点滚到顶，正好看见它排最前
+   *  - 其余情况：重拉当前页，再把滚动位置还原，免得批量置顶时每次都被拽到顶上
+   *  - 用「等最后一次改动过去 220ms 再刷」：一次加好几座时只刷一轮，且用的是最终名单 */
+  let templeLiveTimer = 0;
+  let templeLiveFirst = false;
+  function templeLiveRefresh(toFirst) {
+    if (toFirst) templeLiveFirst = true;
+    if (templeLiveTimer) clearTimeout(templeLiveTimer);
+    templeLiveTimer = setTimeout(() => {
+      templeLiveTimer = 0;
+      const first = templeLiveFirst;
+      templeLiveFirst = false;
+      try { templeLiveKick(first); } catch (e) {}
+    }, 220);
+  }
+  /** 旧版个人页（jQuery）的「当场重排」：站点把每一页都缓存成 .grail_list.pageN，
+   *  点页码时只要那一页的节点还在就直接显示、**不再发请求** —— 所以必须把**所有**页的缓存都删掉。
+   *  只删当前页是不够的：人在第 3 页时置顶，置顶的塔被排到第 1 页，可第 1 页的旧缓存还躺在
+   *  DOM 里，点回去看到的是置顶前的样子，得整页刷新才恢复（v2.3.89 真机踩过）。 */
+  function templeLiveOld() {
+    for (const d of allDocs()) {   // 个人页可能整个在 iframe 里
+      let box = null;
+      try { box = d.querySelector('#grail .temple_list') || d.querySelector('.temple_list'); } catch (e) {}
+      if (!box) continue;
+      let page = '1';
+      try {
+        const cur = d.querySelector('#pager1 .p.p_cur');
+        const n = cur ? String(cur.getAttribute('data-page') || '') : '';
+        if (/^\d+$/.test(n)) page = n;
+      } catch (e) {}
+      // 先确认有页码按钮再删缓存：万一按钮找不到就把列表删空了，页面会变成一片空白
+      let btn = null;
+      try { btn = d.querySelector('#pager1 .p[data-page="' + page + '"]'); } catch (e) {}
+      if (!btn) continue;
+      try {
+        const cached = box.querySelectorAll('.grail_list');
+        for (let i = 0; i < cached.length; i++) cached[i].remove();
+        btn.click();           // 这一页没缓存了，站点会重新请求（正好过我们改写的钩子）
+        return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+  function templeLiveKick(toFirst) {
+    let grid = null;
+    try { grid = locateGridAny(); } catch (e) {}
+    if (!grid) {
+      // 新版面板没开：试试旧版个人页。这里同样要等全量队列就位 —— 没有它改写会直接跳过，
+      // 请求回来的还是站点原顺序，用户会以为「置顶没生效，得刷新」。
+      const old = () => { try { templeLiveOld(); } catch (e) {} };
+      if (pinAllGet()) { old(); return; }
+      pinAllLoad().then((all) => { if (all) old(); }, () => {});
+      return;
+    }
+    const page = locateCurrentPage() || 1;
+    const box = locateScrollBox(grid);
+    const top = box ? box.scrollTop : 0;
+    const keep = !(toFirst && page === 1);
+    const go = () => {
+      try { locateKickReload(page); } catch (e) {}
+      if (keep && box) {
+        // 站点的 scrollToTop 是 smooth 的，等它走完再摆回去
+        setTimeout(() => { try { box.scrollTop = top; } catch (e) {} }, 700);
+      }
+    };
+    if (pinAllGet()) { go(); return; }
+    // 没有全量队列就没法重排（改写会直接跳过）：等它拉完再刷，别让用户以为没生效
+    pinAllLoad().then((all) => { if (all) go(); }, () => {});
+  }
+
+  /** 筛塔列表里图钉的粉色状态是「画的时候」按名单算的：名单一变就得重画这一行。
+   *  面板没开 / 列表还空着时什么都不做。 */
+  function locateRefreshBtns() {
+    try {
+      if (!els || !els.templeList) return;
+      if (!templeAll || !templeAll.length) return;
+      renderTemples();
+    } catch (e) {}
+  }
+
+  async function locateRun(id, nm) {
+    // 浮窗开着但停在别的 tab：先切到「N座圣殿」
+    if (!locateGridAny()) {
+      setTempleStatus('正在切到「N座圣殿」…');
+      await locateEnsureTempleTab();
+    }
+    if (!locateGridAny()) {
+      // 个人圣殿页没开：记下来，等用户点开自己的头像后自动接着跑
+      locatePending = { cid: id, at: Date.now() };
+      if (locateTempleTab()) {
+        // 浮窗开着、tab 也在，就是没读到塔卡：多半是还没渲染完
+        setTempleStatus('没读到圣殿列表（可能还在加载）：等一秒再点一次定位');
+        try { pinToast('圣殿列表还没出来，稍等再点一次'); } catch (e) {}
+      } else {
+        setTempleStatus('已记下：先在小圣杯主页点开你的头像、切到「N座圣殿」，开着就会自动排好');
+        try { pinToast('先点开自己的头像（圣殿页），会自动定位 ' + nm); } catch (e) {}
+      }
+      return false;
+    }
+
+    // 改写要靠全量队列做排序表：没有就先拉一次，否则第一页还是原顺序
+    if (!pinAllGet()) {
+      setTempleStatus('正在读你的圣殿列表…');
+      try { await pinAllLoad(); } catch (e) {}
+    }
+    // 先把它（以及之前定位的几座）标记好，再逼站点重拉第 1 页 —— 顺序是数据层决定的
+    try { pinLocateSet(id); } catch (e) {}
+    // 名单刚变：把筛塔列表里的图钉重画一次，按钮当场变粉（不然要等下一次重画）
+    locateRefreshBtns();
+    const t0 = Date.now();
+    setTempleStatus('正在把它排到第 1 页…');
+    const kicked = locateKickReload(1);
+    if (!kicked) {
+      // 分页器还没渲染好：先把能认出来的那张卡标粉，等用户切一次分页就会排好
+      const c0 = locateCardAny(id);
+      if (c0) {
+        try {
+          const el0 = locateNameOf(c0);
+          if (el0) el0.classList.add('tgtk-locate-name');
+          c0.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (e) {}
+        setTempleStatus('已标记 ' + nm + '：分页器还没渲染好，切一次分页就排到最前');
+        try { pinToast('已标记：切一次分页就排到最前'); } catch (e) {}
+        return true;
+      }
+      setTempleStatus('分页器还没渲染好：稍等一下再点定位，或手动切一次分页');
+      return false;
+    }
+    // 等这一轮的第 1 页回来（改写后的顺序才算数）
+    let rec = null;
+    for (let i = 0; i < 14; i++) {
+      await sleep(300);
+      const one = pinPages[1];
+      if (one && one.at >= t0 && one.items && one.items.length) { rec = one; break; }
+    }
+
+    // 数据层确认：第 1 页第几个是它
+    let idx = -1;
+    if (rec && rec.items) {
+      for (let i = 0; i < rec.items.length; i++) {
+        const it = rec.items[i];
+        if (it && String(it.CharacterId) === id) { idx = i; break; }
+      }
+    }
+    // 数据层回来了，DOM 还要一拍才重画完 —— 等那张卡真的出现（并核对 id），
+    // 否则会把 class 加到马上被替换掉的旧节点上（看着像「没标粉」）
+    let card = null;
+    for (let round = 0; round < 12; round++) {
+      const g2 = locateGridAny();
+      if (idx >= 0 && g2 && g2.children && g2.children[idx]) {
+        const c2 = g2.children[idx];
+        let cid2 = '';
+        try {
+          const inner = c2.querySelector('[data-character-id]');
+          cid2 = pinCardCid(c2) || (inner ? pinCardCid(inner) : '');
+        } catch (e) {}
+        if (!cid2 || String(cid2) === id) { card = c2; break; }
+      }
+      card = locateCardAny(id);
+      if (card) break;
+      await sleep(250);
+    }
+    if (!card) {
+      setTempleStatus(`没排上：这一轮没拿回你的列表（站点可能用了缓存），刷新一次页面再点定位`);
+      try { pinToast('没排上：刷新一次页面再点定位'); } catch (e) {}
+      return false;
+    }
+    try {
+      const nameEl = locateNameOf(card);
+      if (nameEl && !nameEl.classList.contains('tgtk-locate-name')) nameEl.classList.add('tgtk-locate-name');
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+    const pos = idx >= 0 ? `第 ${idx + 1} 个` : '已高亮';
+    setTempleStatus(`已定位：${nm} 排在第 1 页${pos}（角色名已标粉）`);
+    try { pinToast('已定位：' + nm + ' 排在第 1 页' + pos); } catch (e) {}
+    return true;
+  }
+
+  /** 点这张卡的塔图 */
+  function locateClickCard(card, id, nm) {
+    try {
+      const nameEl = locateNameOf(card);
+      if (nameEl) nameEl.classList.add('tgtk-locate-name');
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+    // 站点把 onClick 挂在卡片里的 #tg-temple-image 上（aspect-[3/4] 那块画面），
+    // 优先点它本身；找不到再退回「面积最大的画面」。
+    let box = null;
+    try { box = card.querySelector('#tg-temple-image'); } catch (e) {}
+    if (!box) box = pinCoverBox(card) || card;
+    try {
+      box.click();
+      setTempleStatus('已打开塔图浮窗：' + nm + '（修改 / 道具 / 星之力都在里面）');
+      try { pinToast('已打开塔图浮窗：' + nm); } catch (e) {}
+      // 浮窗自己带 data-character-id：核对一下，别把别人的塔当成自己的
+      try {
+        const det = HDOC.querySelector('#tg-temple-detail');
+        const got = det && det.getAttribute('data-character-id');
+        if (got && String(got) !== String(id)) {
+          setTempleStatus('打开的是 #' + got + '，不是 #' + id + '：请刷新页面后重试');
+        }
+      } catch (e) {}
+      return true;
+    } catch (e) {
+      setTempleStatus('打开塔图浮窗失败：' + (e && e.message ? e.message : e));
+      return false;
+    }
+  }
+
   function renderTemples() {
     const list = els.templeList;
     list.textContent = '';
     if (!templeAll.length) return;
 
     const key = S.field;
-    const rows = templeRows();
+    const pool = templePool();
+    const rows = templeRows(pool);
     // 一次遍历算完阈值命中数，别对九千座塔来回过滤好几遍
     let under = 0;
-    for (let i = 0; i < templeAll.length; i++) {
-      if (num(templeAll[i][key]) < num(S.threshold)) under++;
+    for (let i = 0; i < pool.length; i++) {
+      if (num(pool[i][key]) < num(S.threshold)) under++;
     }
     // 统计只写「这座筛选条件下的结果」，不再附带默认立绘 / 已换图的总数
     const useA = templeUseAssets();
     const useC = templeUseCover();
     const coverName = S.cover === 'custom' ? '已换过塔图' : '未换塔图';
-    let head = `共 ${templeAll.length} 座塔`;
-    if (templeExcluded) head += ` · 已排除 ${fmt(templeExcluded)} 座未建成（上限 < ${TEMPLE_MIN_CAP}）`;
+    let head = `共 ${pool.length} 座塔`;
+    if (templeUseMine()) {
+      // 认不出我是谁就没法只留我的塔：直接说清楚，别拼一句「0 座 · 未勾选筛选条件」自相矛盾
+      if (!mineKeys.names.length && !mineKeys.uid) {
+        list.appendChild(
+          h('div', { class: 'tgtk-empty' }, '没认出你的账号：请先在小圣杯登录，或打开一次个人页再扫')
+        );
+        els.templeStat.textContent = '只筛自己圣殿：没认出你的账号';
+        return;
+      }
+      head = `自己的圣殿 ${pool.length} 座`;
+    }
+    const exc = templeUseMine() ? templeExcludedMine : templeExcluded;
+    if (exc) head += ` · 已排除 ${fmt(exc)} 座未建成（上限 < ${TEMPLE_MIN_CAP}）`;
     if (useA && useC) head += ` · 固定资产 < ${num(S.threshold)} ${coverName}：${rows.length} 座`;
     else if (useA) head += ` · 固定资产 < ${num(S.threshold)}：${under} 座`;
     else if (useC) head += ` · ${coverName}：${rows.length} 座`;
     else head += ' · 未勾选筛选条件（全部显示）';
+    // 「我的塔」没读到：损坏塔补不上，明说一句，别让人以为塔凭空少了
+    if (mineLoadFailed && S.source !== 'user') head += ' · 我的塔没读到，损坏塔可能没补上';
     els.templeStat.textContent = head;
 
     if (!rows.length) {
-      list.appendChild(h('div', { class: 'tgtk-empty' }, '没有符合条件的塔'));
+      list.appendChild(
+        h('div', { class: 'tgtk-empty' }, templeUseMine() ? '你的圣殿里没有符合条件的塔' : '没有符合条件的塔')
+      );
       return;
     }
 
@@ -3121,6 +3852,8 @@
       const hitRow = num(t[key]) < num(S.threshold);
       const ci = coverInfo(t);
       const cid = String(t.CharacterId || '');
+      // 自己的塔才给「定位」：别人的塔在个人页里找不到
+      const canLocate = !!cid && templeIsMine(t);
       if (cid && !t.CharacterName && !nameCache[cid] && !templeNameTried[cid]) {
         templeNameTried[cid] = 1;
         need.push(cid);
@@ -3132,11 +3865,44 @@
           h(
             'div',
             { class: 'tgtk-main' },
-            charaLink(t.CharacterId, t.CharacterName),
+            h(
+              'span',
+              { class: 'tgtk-namerow' },
+              charaLink(t.CharacterId, t.CharacterName),
+              // 自己的塔才给「定位」：别人的塔在个人页里找不到。
+              // 用小符号贴在角色名右边，别在行尾多占一块地方。
+              canLocate
+                ? h(
+                    'button',
+                    {
+                      class: 'tgtk-locbtn' + (pinLocateHas(cid) ? ' on' : ''),
+                      type: 'button',
+                      title: pinLocateHas(cid)
+                        ? '已定位：再点一下取消这一座'
+                        : '把这座塔临时排到个人圣殿页第 1 页最前面（不改置顶名单）',
+                      onclick: (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (pinLocateHas(cid)) {
+                          try { pinLocateRemove(cid); } catch (err) {}
+                          setTempleStatus('已取消定位：' + (pinNameGet(cid) || charaName(cid) || '#' + cid));
+                          // 重拉一次当前页，让列表立刻回到正常顺序（面板没开时这个调用是无害的空操作）
+                          templeLiveRefresh(false);
+                          renderTemples();
+                          return;
+                        }
+                        locateGo(cid);
+                      },
+                    },
+                    locatePinIcon()
+                  )
+                : null
+            ),
             h(
               'span',
               { class: 'tgtk-sub' },
               `${t.Nickname || t.Name || '未知'} · 塔Lv${gxTempleLv(t)}` +
+                (t.Link || t.LinkId ? ' · LINK' : '') +
                 (t.CharacterLevel ? ` · 角色Lv${t.CharacterLevel}` : '') +
                 (ci.isDefault ? ' · 默认图' : ' · 已换图')
             )
@@ -7201,7 +7967,20 @@
       placeholder: '角色 ID，逗号或换行分隔，例如 1,2,32',
     });
     tChars.value = S.chars;
-    const tCtxChars = h('div', { class: 'tgtk-ctx', 'data-ctx': 'chars' }, tChars);
+    // 「只筛自己圣殿」：勾上后只留下塔主是我的那些塔，把角色列表当「搜自己的圣殿」用
+    const chkOnlyMine = h('input', { id: 'tgtk-onlymine', type: 'checkbox' });
+    chkOnlyMine.checked = !!S.onlyMine;
+    const tCtxChars = h(
+      'div',
+      { class: 'tgtk-ctx', 'data-ctx': 'chars' },
+      tChars,
+      h(
+        'label',
+        { class: 'tgtk-chk tgtk-ctxchk', title: '勾上后只保留塔主是你的圣殿（含 LINK 塔），可以当搜索自己圣殿用' },
+        chkOnlyMine,
+        ' 只筛自己圣殿'
+      )
+    );
     const tRun = h('button', { class: 'tgtk-btn tgtk-primary', type: 'button' }, '扫描');
     const tCopy = h('button', {
       class: 'tgtk-btn', type: 'button', title: '复制当前筛出的全部角色 ID（空格分隔）',
@@ -7259,7 +8038,7 @@
       tCtxChars,
       h('div', { class: 'tgtk-line tgtk-actions' }, tRun, tCopy),
       h('div', { class: 'tgtk-note' },
-        `筛选前提：只统计已建成圣殿（固定资产上限 ≥ ${TEMPLE_MIN_CAP}）；上限不足的未建成塔会自动排除`),
+        `筛选前提：只统计已建成圣殿（固定资产上限 ≥ ${TEMPLE_MIN_CAP}）；上限不足的未建成塔会自动排除。LINK 塔和「我的塔」里的损坏塔会一起并进来`),
       templeStat,
       templeList
     );
@@ -7764,15 +8543,15 @@
       ),
       icoStat,
       icoList,
-      h(
-        'div',
-        { class: 'tgtk-note' },
-        '自动注资：结束前 N 分钟若还没到目标等级，按缺口一次性补钱（补到该等级为止）。' +
-          'ICO 升级要同时满足「资金」和「人数(10+5×等级)」，人数不够时补钱也升不上去。' +
-          '计划存在本机：关掉小圣杯页、切到别的 bgm 页面、重开浏览器后都还在，' +
-          '只要还有任意一个 bgm 页面开着就会继续执行；把「结束前」设成 30 分钟，' +
-          '就算到点前关机也不怕。'
-      ),
+      h('div', { class: 'tgtk-note' }, [
+        '· 只在浏览器里跑：得有一个 bgm 页面开着（不必开小圣杯）',
+        h('br'),
+        '· 关电脑、关浏览器就停，不会补款',
+        h('br'),
+        '· 结束前 N 分钟内没到目标等级，按缺口补一次',
+        h('br'),
+        '· 人数不够（需 10+5×等级）时补钱也升不上，会跳过',
+      ]),
       icoLog
     );
 
@@ -7800,6 +8579,7 @@
     const pinSwitch = h('button', { class: 'tgtk-pintoggle', type: 'button' });
     const pinAdd = input('tgtk-pinadd', '', { placeholder: '角色名 / ID，可多个' });
     const pinAddBtn = h('button', { class: 'tgtk-btn', type: 'button' }, '置顶');
+    const pinFav = favBtn('从收藏夹选角色置顶');
     const pinStat = h('div', { class: 'tgtk-stat tgtk-pinstat' }, '');
     const pinListBox = h('div', { class: 'tgtk-pinlist' });
 
@@ -7885,12 +8665,13 @@
     );
     const botInput = input('tgtk-botadd', '', { placeholder: '角色名 / ID，可多个' });
     const botAddBtn = h('button', { class: 'tgtk-btn', type: 'button' }, '添加');
+    const botFav = favBtn('从收藏夹选角色置底');
     const botStat = h('div', { class: 'tgtk-stat' }, '');
     const botListBox = h('div', { class: 'tgtk-pinlist tgtk-botlist' });
     const botBody = h(
       'div',
       { class: 'tgtk-sectbody', hidden: 'hidden' },
-      h('div', { class: 'tgtk-line' }, botInput, botAddBtn, clearBtn(botInput)),
+      h('div', { class: 'tgtk-line' }, botInput, botAddBtn, botFav, clearBtn(botInput)),
       botStat,
       botListBox,
       h('div', { class: 'tgtk-note' }, '置底的角色会排在个人页最后一页的最后一个，不需要调顺序。')
@@ -7989,14 +8770,14 @@
       const trouble = addTroubleText(r.noTower, r.miss);
       pinToast(
         added.length
-          ? `已置底 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，刷新个人页生效`
+          ? `已置底 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，已排到最后一页最后`
           : trouble
             ? '没有可添加的角色'
             : '这些角色都已经在置底名单里了'
       );
       botStat.textContent =
         (added.length ? `已置底 ${added.length} 座。` : '') +
-        (trouble || (added.length ? '刷新个人页生效' : '这些角色都已经在置底名单里了，不用重复添加'));
+        (trouble || (added.length ? '个人圣殿页开着就当场重排，不用刷新' : '这些角色都已经在置底名单里了，不用重复添加'));
     };
     botAddBtn.addEventListener('click', () => {
       addBotNow().catch(() => {});
@@ -8007,6 +8788,18 @@
       onPick: (it) => {
         if (it && it.id) pinNameSet(it.id, it.name);
         addBotNow().catch(() => {});
+      },
+    });
+    // 收藏夹里点一个就直接置底一个（不用再回输入框确认）；没有我的塔的会被拦下来并提示
+    bindFavPicker(botFav, botInput, {
+      onPick: async (cid) => {
+        botInput.value = String(cid);
+        try {
+          await addBotNow();
+        } catch (e) {
+          return false;
+        }
+        return botHas(cid);
       },
     });
 
@@ -8107,6 +8900,7 @@
       tuiSave();
       renderPinList();
       if (TUI.on) pinRefreshSnaps();
+      templeLiveRefresh(false);
       pinToast(TUI.on ? '圣殿置顶已开启' : '圣殿置顶已关闭');
     });
 
@@ -8154,7 +8948,7 @@
       const trouble = addTroubleText(r.noTower, r.miss);
       pinToast(
         added.length
-          ? `已置顶 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，刷新个人页生效`
+          ? `已置顶 ${added.length} 座${dup ? `（${dup} 座本来就在）` : ''}，已排到第 1 页最前`
           : trouble
             ? '没有可置顶的角色'
             : '这些角色都已经在置顶名单里了'
@@ -8175,6 +8969,18 @@
         // 从候选里点选的，名字当场就知道，直接记下来
         if (it && it.id) pinNameSet(it.id, it.name);
         pinAddNow().catch(() => {});
+      },
+    });
+    // 收藏夹里点一个就直接置顶一个（名单顺序按点的先后追加）；没有我的塔的会被拦下来并提示
+    bindFavPicker(pinFav, pinAdd, {
+      onPick: async (cid) => {
+        pinAdd.value = String(cid);
+        try {
+          await pinAddNow();
+        } catch (e) {
+          return false;
+        }
+        return pinHas(cid);
       },
     });
 
@@ -8233,7 +9039,7 @@
         h('span', { class: 'tgtk-colname' }, '个人页圣殿置顶'),
         pinSwitch
       ),
-      h('div', { class: 'tgtk-line' }, pinAdd, pinAddBtn, clearBtn(pinAdd)),
+      h('div', { class: 'tgtk-line' }, pinAdd, pinAddBtn, pinFav, clearBtn(pinAdd)),
       pinStat,
       pinListBox
     );
@@ -8795,7 +9601,20 @@
       });
       if (els.dailyView) els.dailyView.hidden = !dailyOpen;
       // 筛塔页：用户名空着就自动填自己（换页 / 清空过之后回来也会补上）
-      if (S.tab === 'temple') ensureTempleUser();
+      if (S.tab === 'temple') {
+        ensureTempleUser();
+        // 刷新页面后别每次都重新扫：参数没变就恢复上次的结果
+        if (!templeAll.length && templeScanRestore()) {
+          renderTemples();
+          setTempleStatus('已恢复上次的扫描结果（点「扫描」可刷新）');
+          // 恢复出来的列表里没有「我是谁」：补一次身份，角色名右边的定位按钮才会出来
+          loadMineKeys()
+            .then(() => {
+              if (templeAll.length && els) renderTemples();
+            })
+            .catch(() => {});
+        }
+      }
       if (S.tab === 'fav') {
         clearFavAddAutofill();
         syncFavPick();
@@ -8870,6 +9689,16 @@
     chkCover.addEventListener('change', () => {
       S.filCover = !!chkCover.checked;
       persist();
+      renderTemples();
+    });
+    chkOnlyMine.addEventListener('change', async () => {
+      S.onlyMine = !!chkOnlyMine.checked;
+      persist();
+      // 先认账号再重画，否则「我是谁」还没落地，列表会先空一下
+      if (S.onlyMine && S.source === 'chars' && templeAll.length) {
+        if (els && els.templeStat) els.templeStat.textContent = '正在确认你的账号…';
+        await loadMineKeys();
+      }
       renderTemples();
     });
 
@@ -9810,6 +10639,7 @@
   /* 星星徽标要嵌进角色页 DOM；角色页常在 iframe 里，拿不到顶层文档注入的 CSS，
    * 所以自带一份只作用于 #tgtk-star 的样式，随按钮一起注入那个文档。 */
   const STAR_CSS = `
+
 /* 星标用定位容器包住：容器占位不变（不会把标题行撑高），
    星标绝对定位填满左侧一格；旧版角色页再补一枚同尺寸的「$」紧贴在它右边，
    两个按钮永远并排、左边缘对齐，星星再多也不会被挤走。 */
@@ -9975,7 +10805,27 @@
       // 找不到才退回下面的星级图标行末尾。
       const favb = gxNewFavBtn(d);
       if (favb && favb.parentElement) {
-        return { doc: d, parent: favb.parentElement, after: favb, append: false, fav: true };
+        // 星标别夹在「+收藏」和它后面的标签之间：补挂时会把标签挤开一下，看着就是闪。
+        // 挂到这一行最后一个标签后面（用户指定位置），补挂只影响行尾，不动中间。
+        const pr = favb.parentElement;
+        let after = favb;
+        try {
+          const fr = favb.getBoundingClientRect();
+          const midY = fr.top + fr.height / 2;
+          const tol = Math.max(6, fr.height / 2);
+          const kids = Array.prototype.slice.call(pr.children);
+          const at = kids.indexOf(favb);
+          for (let i = at + 1; i < kids.length; i++) {
+            const k = kids[i];
+            if (!k || k.id === 'tgtk-starbox' || k.id === 'tgtk-star') continue;
+            const r = k.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            // 只认「同一行」的标签：下一行的操作按钮 / 圣殿网格不算，否则星标会被甩到整块底部
+            if (Math.abs(r.top + r.height / 2 - midY) > tol) continue;
+            after = k;
+          }
+        } catch (e) {}
+        return { doc: d, parent: pr, after, append: false, fav: true };
       }
       // 新版：星级图标行，插到它右边
       for (const sel of newSels) {
@@ -10505,10 +11355,18 @@
       }
       ensureStarStyle(anchor.doc);
       if (!starBox) starBox = h('span', { id: 'tgtk-starbox' });
-      // 角色切换 / React 重渲染 / 旧版 jQuery 换框会换掉锚点，按钮跟着重新挂到锚点右边
-      const sameAnchor = starAnchorAfter && starAnchorAfter.isConnected &&
-        starAnchorAfter === (anchor.append ? anchor.parent : anchor.after);
-      if (!starBox.isConnected || starBox.parentElement !== anchor.parent || !sameAnchor) {
+      /* 角色切换 / React 重渲染 / 旧版 jQuery 换框会换掉锚点，按钮跟着重新挂到锚点右边。
+         但「又找到了别的锚点」不等于「旧位置坏了」：新版角色浮窗是 React 渲染的，
+         点开 / 关闭塔图会把「收藏」按钮和星级行重建一遍，缓存过期后锚点常常指到另一个节点，
+         这时照旧 remove + append 就会肉眼闪一下（点一次塔图闪两次）。
+         所以只在真的丢了（节点被移除 / 换了角色）时才搬；只要星标还好端端待在这块区域
+         （同一父容器）里，就让它原地待着。 */
+      const boxAlive = !!(starBox && starBox.isConnected && starBox.parentElement);
+      const sameAnchor = !!(starAnchorAfter && starAnchorAfter.isConnected &&
+        starAnchorAfter === (anchor.append ? anchor.parent : anchor.after));
+      const sameParent = boxAlive && starBox.parentElement === anchor.parent;
+      const idSwitched = !!starCharId && id !== starCharId;
+      if (!boxAlive || idSwitched || (!sameAnchor && !sameParent)) {
         if (starBox.isConnected) starBox.remove();
         // 星标装进定位容器里：容器占位跟原来的按钮一样，
         // 「$」历史交易按钮就能绝对定位到它右侧，星星再多也挤不掉。
@@ -10568,7 +11426,9 @@
       refreshStarBadge();
     };
     ensure();
-    starTimer = setInterval(ensure, 900);
+    // 900 → 2000：切角色有 hashchange / popstate + 下面的观察器立刻兜，
+    // 定时器只负责「站点悄悄重绘后补挂」，没必要 0.9 秒一次。
+    starTimer = setInterval(ensure, 2000);
     // SPA / hash 路由切角色时立刻刷新，不等定时器，避免星星状态滞后
     if (!starListenersBound) {
       starListenersBound = true;
@@ -10581,15 +11441,33 @@
       // 旧版小圣杯（jQuery）点 DD 列表换角色只重建 #grailBox、不发任何路由事件，
       // 用 MutationObserver 盯着角色框，变化时立刻重挂星星标并刷新点亮状态。
       // 只在「角色变了 / 星星标被重建弄丢」时才 ensure，避免自身渲染触发无限回调。
+      // 站点一次插入几百行时回调会被调用很多次：已经排过就直接 return，
+      // 不要每次 clearTimeout + setTimeout 重排（原来那样等于把防抖变成「永远往后推」）。
       let moTimer = null;
-      const mo = (typeof MutationObserver !== 'undefined') ? new MutationObserver(() => {
-        clearTimeout(moTimer);
+      let moDelay = -1;
+      /** 排队跑一次 ensure：星标丢了就下一帧立刻补（0ms），否则走 300ms 防抖。
+       *  新版角色浮窗是 React 渲染的，点开 / 关闭塔图会把交易框整块重建，
+       *  星标跟着被删；原来一律等 300ms，那 0.3 秒的空档就是肉眼看到的「闪一下」。 */
+      const moQueue = (delay) => {
+        if (moTimer) {
+          if (delay >= moDelay) return;
+          clearTimeout(moTimer); // 有更急的事：把原来排的 300ms 提前
+        }
+        moDelay = delay;
         moTimer = setTimeout(() => {
+          moTimer = null;
+          moDelay = -1;
           const id = currentCharacterId();
           const lost = !starBadge || !starBadge.isConnected ||
             (starAnchorAfter && !starAnchorAfter.isConnected);
           if (id !== starCharId || lost) ensure();
-        }, 160);
+        }, delay);
+      };
+      const mo = (typeof MutationObserver !== 'undefined') ? new MutationObserver(() => {
+        // 只在「角色变了 / 星星标被重建弄丢」时才 ensure，避免自身渲染触发无限回调。
+        const lostNow = !starBadge || !starBadge.isConnected ||
+          (starAnchorAfter && !starAnchorAfter.isConnected);
+        moQueue(lostNow ? 0 : 300);
       }) : null;
       if (mo) {
         const observeDoc = (d) => {
@@ -11020,6 +11898,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     szAt: 0,
     foldBtn: null,
     applyGrail: null,
+    // tick 的「本页到底有没有小圣杯」判定：命中过就永久放行（站点是 SPA），
+    // 没命中过的每 2 秒复检一次，避免在条目页 / 讨论区里白跑整条增强链
+    pageEver: false,
+    pageAt: 0,
+    pageWarm: 3,
   };
 
   /** 无缝 link 图：class 挂在 <html> 上，CSS 用 html.tgtk-seamless 前缀；
@@ -11785,11 +12668,55 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
   }
 
+  /** #grailBox 有几个：每次都全文档扫（`[id^=...]` 是属性前缀匹配，最慢的一种），
+   *  上千张卡时单次几十毫秒。3 秒内复用，节点被站点换掉（isConnected 为 false）立刻重查。 */
+  const gxGbCache = new WeakMap();
+  function gxGrailBoxes(d) {
+    const c = gxGbCache.get(d);
+    const now = Date.now();
+    if (c && now - c.at < 3000 && c.list.length && c.list.every((x) => x.isConnected)) return c.list;
+    let list = [];
+    try { list = Array.from(d.querySelectorAll('#grailBox,[id^="grailBox"],.grailBox')); } catch (e) {}
+    gxGbCache.set(d, { at: now, list });
+    return list;
+  }
+
+  /** 把「圣殿卡片列表」从扫描范围里摘掉，只留头部那几行。
+   *  旧版结构： #grailBox > .assets_box > { 标题行… , #lastTemples.assets }。 */
+  function gxHeadScopes(gb) {
+    const out = [];
+    try {
+      const list = gb.querySelector(
+        '#lastTemples, [id^="lastTemples"], .assets, .grail_list, .temple_list'
+      );
+      if (!list) return Array.from(gb.children || []);
+      let n = list;
+      while (n && n !== gb && n.parentElement) {
+        const p = n.parentElement;
+        for (const sib of Array.from(p.children)) {
+          if (sib === n) continue;
+          if (sib.contains && sib.contains(list)) continue;
+          out.push(sib);
+        }
+        n = p;
+      }
+    } catch (e) {
+      return Array.from(gb.children || []);
+    }
+    return out; // 除了列表什么都没有 → 空数组，别退回整块
+  }
+
   /** 新版：圣殿列表 sticky 表头里、右侧「筛选」框左边；
    *  旧版：「[显示全部]」链接右边。站点重绘换节点后由 tick / 观察器重挂。 */
-  function gxMountSize() {
+  let gxSizeAt = 0;
+  const gxSizeMiss = new WeakMap(); // doc → 这之前别再全量扫
+  function gxMountSize(force) {
+    const __now = Date.now();
+    if (!force && __now - gxSizeAt < 500) return;
+    gxSizeAt = __now;
     let placed = false;
     for (const d of allDocs()) {
+      if (!force && (gxSizeMiss.get(d) || 0) > __now) continue;
       // ---- 新版 ----
       try {
         let header = d.getElementById && d.getElementById('tg-trade-box-temple-header');
@@ -11812,27 +12739,36 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       } catch (e) {}
       // ---- 旧版 ----
       try {
-        for (const gb of d.querySelectorAll('#grailBox,[id^="grailBox"],.grailBox')) {
+        for (const gb of gxGrailBoxes(d)) {
           if (gb.hasAttribute && gb.hasAttribute('data-tgtk-dup')) continue;
           if (!/(?:^|\s)chara\d+(?:\s|$)/.test(String(gb.className || ''))) continue;
+          // 「显示全部 / 固定资产」永远在卡片列表之外，而列表可能有上千张卡：
+          // 以前在整块 gb 里扫，一千座塔单次就要几百毫秒（还被观察器每秒叫好几次）。
+          const scopes = gxHeadScopes(gb);
           let showAll = null;
-          for (const el of gb.querySelectorAll('a,button,span,small,em,b')) {
-            if (el.children.length) continue;
-            const t = String(el.textContent || '').replace(/[\s\[\]（）()]/g, '');
-            if (t === '显示全部' || t === '显示重复' || t === '显示全部圣殿') {
-              showAll = el;
-              break;
+          for (const sc of scopes) {
+            for (const el of sc.querySelectorAll('a,button,span,small,em,b')) {
+              if (el.children.length) continue;
+              const t = String(el.textContent || '').replace(/[\s\[\]（）()]/g, '');
+              if (t === '显示全部' || t === '显示重复' || t === '显示全部圣殿') {
+                showAll = el;
+                break;
+              }
             }
+            if (showAll) break;
           }
           let host = showAll ? showAll.parentElement : null;
           let before = showAll ? showAll.nextSibling : null;
           if (!host) {
             // 兜底：固定资产那一行（含「往期竞拍 / 萌王投票 / 资产重组」链接）
-            for (const el of gb.querySelectorAll('div,span,p')) {
-              const t = String(el.textContent || '');
-              if (t.length > 160 || !/固定资产/.test(t)) continue;
-              if (!/显示全部|往期竞拍|萌王投票|资产重组/.test(t)) continue;
-              if (!host || host.contains(el)) host = el;
+            for (const sc of scopes) {
+              for (const el of sc.querySelectorAll('div,span,p')) {
+                const t = String(el.textContent || '');
+                if (t.length > 160 || !/固定资产/.test(t)) continue;
+                if (!/显示全部|往期竞拍|萌王投票|资产重组/.test(t)) continue;
+                if (!host || host.contains(el)) host = el;
+              }
+              if (host) break;
             }
           }
           if (host) {
@@ -11843,6 +12779,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         }
       } catch (e) {}
       if (placed) break;
+      gxSizeMiss.set(d, __now + 30000); // 本页没有可挂的地方，30 秒内别再翻
     }
     // 不在角色页就把下拉摘下来，别留在别的页面上
     if (!placed && gxSizeEl && gxSizeEl.parentElement) gxSizeEl.remove();
@@ -12654,7 +13591,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
    *      <div class="babel scroller"><div class="v_scroller"><div class="logs">…</div>）。
    *  之前用「带 4h ago 的列表」猜宿主，我们自己注入的 6m ago 行也会被当成新宿主，
    *  下一轮反复清空 / 重建 / 重新请求，分页条叠了好几层 —— 改成钉死真实锚点。 */
+  const gxStarLogMiss = new WeakMap(); // doc → 这之前别再全页找「通天塔」
   function gxFindStarLogHost() {
+    const __sln = Date.now();
     for (const d of allDocs()) {
       // 新版 React 页面自带正确实现，绝对不动
       try {
@@ -12669,7 +13608,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           host = tower.querySelector('.logs') || null;
         }
       } catch (e) {}
-      // 兜底：容器 id 换了，仍要求「通天塔」标题与 .logs 在同一块里
+      // 兜底：容器 id 换了，仍要求「通天塔」标题与 .logs 在同一块里。
+      // 这条兜底要遍历 div/span/h2… 逐个读文本，上千张卡的页面上是几万个元素；
+      // 页面上本来就没有通天塔时，每 1.2 秒白扫一遍。没找到就 10 秒内不再扫。
+      if (!host && (gxStarLogMiss.get(d) || 0) > __sln) continue;
       if (!host) {
         let t = null;
         try {
@@ -12680,14 +13622,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             break;
           }
         } catch (e) { continue; }
-        if (!t) continue;
+        if (!t) { gxStarLogMiss.set(d, __sln + 10000); continue; }
         let up = t.parentElement;
         for (let i = 0; i < 4 && up; i++, up = up.parentElement) {
           const l = up.querySelector && up.querySelector('.logs');
           if (l) { host = l; tower = up; break; }
         }
       }
-      if (!host) continue;
+      if (!host) { gxStarLogMiss.set(d, __sln + 10000); continue; }
       // 铁律：绝不把我们自己注入的面板当成宿主（否则必然反复接管）
       if (host.closest && host.closest('#tgtk-starlog')) continue;
       if (host.id === 'tgtk-starlog' || /tgtk-slog/.test(String(host.className || ''))) continue;
@@ -12818,7 +13760,12 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
    * 新版 React 萌王投票页：类名未知，用「人数 / 拍卖数 / 拍卖总数」这一行反查卡片
    * （每张卡底部都有 `3 / 4,052 / 4,050` 这种格式），取同一父容器下最大的一组。
    */
+  let gxTopWeekMissAt = 0; // 文字反查一次没结果，10 秒内别再翻整页
   function gxTopWeekCards() {
+    // 这条兜底要遍历全页 div/span/small/b/i/p/em，逐个读文本再正则，
+    // 里面还读 offsetWidth（强制布局）。它只对「新版萌王投票页」有意义，
+    // 可几乎所有页面上都会白跑一遍 —— 没结果就歇 10 秒（v2.3.65）。
+    if (Date.now() - gxTopWeekMissAt < 10000) return [];
     const re = /^\d+\s*\/\s*[\d,]+\s*\/\s*[\d,]+$/;
     const found = [];
     for (const d of allDocs()) {
@@ -12854,7 +13801,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     groups.forEach((arr) => {
       if (arr.length > best.length) best = arr;
     });
-    return best.length >= 4 ? best : [];
+    if (best.length >= 4) return best;
+    gxTopWeekMissAt = Date.now();
+    return [];
   }
 
   /** 萌王榜：鼠标悬停才弹综合信息卡（评分抹掉个位十位） */
@@ -13308,8 +14257,27 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   const gxWatch = new WeakMap();
   let gxReapplyBusy = false;
 
+  let gxReapplyAt = 0;
   function gxReapply(doc, templeDirty) {
     if (gxReapplyBusy) return;
+    // 这一整套是给「新版 React 整块重绘」准备的：节点随时被换掉，所以要 40ms 级重贴。
+    // 旧版是 jQuery 一次性渲染 + 局部重建，1.2 秒的 tick 完全够用；
+    // 在旧版上跑它，只会在「点开塔图弹窗」这种大 DOM 变化时被连环触发 ——
+    // 一次要做十来项全文档扫描（圣殿尺寸 / 去重 / 星之力胶囊 / 交换按钮…），
+    // 圣殿上千座时单次要几百毫秒，触发比跑得还快，主线程直接躺平（v2.3.56 报的卡死）。
+    try {
+      if (!doc || !doc.querySelector || !doc.querySelector('[id^="tg-"]')) return;
+    } catch (e) { return; }
+    const __now = Date.now();
+    const __rapid = __now - gxReapplyAt < 120;
+    gxReapplyAt = __now;
+    if (__rapid) {
+      // DOM 风暴里只保「必须当场补」的尺寸标记（关弹窗不能闪），重活留给 1.2 秒的 tick
+      gxReapplyBusy = true;
+      try { gxTempleSizeFast(!templeDirty); } catch (e) {}
+      gxReapplyBusy = false;
+      return;
+    }
     gxReapplyBusy = true;
     try {
       applySeamless(); // iframe 重载 / 新文档出现时把「无缝 link 图」开关补上
@@ -13355,6 +14323,41 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             return false;
           };
           for (const r of records) {
+            /* 星之力胶囊被站点改回「收益率」：**当场**改回来。
+               MutationObserver 回调跑在 DOM 变更之后、浏览器绘制之前（微任务），
+               这里同步写文本，浏览器根本不会画出中间态 —— 这才是「不闪」的关键；
+               交给 setTimeout / 心跳去补，一定会先渲染一帧收益率。
+
+               两种情况：
+               ① 元素还在、只是文本被改 → 只改回文本（最轻）；
+               ② 站点把整个胶囊换了（React 常这么干）→ 按卡片重画一次（同一微任务里，仍然不闪）。 */
+            if (r.type === 'characterData' || r.type === 'childList') {
+              const t = r.type === 'characterData' ? r.target && r.target.parentElement : r.target;
+              if (t && t.nodeType === 1) {
+                // 我们自己的覆盖层：写它就是我们在干活，别自激
+                try {
+                  if (t.closest && t.closest('.tgtk-starov')) continue;
+                } catch (e) {}
+                const recSame = paintedStarCards.get(t);
+                if (recSame && recSame.el && recSame.el.isConnected) {
+                  const want = String(Math.round(num(recSame.star)));
+                  if (String(recSame.el.textContent) !== want) {
+                    recSame.el.textContent = want;
+                    continue;
+                  }
+                }
+                const card = paintedCardOf(t);
+                if (card && !starSyncBusy) {
+                  starSyncBusy = true;
+                  try {
+                    const rc = paintedStarCards.get(card);
+                    if (rc) starPillPaint(card, rc.star);
+                  } catch (e) {}
+                  starSyncBusy = false;
+                  continue;
+                }
+              }
+            }
             // React 重渲染 LINK 卡时常常只改 style（背景图被写回原顺序），不换节点；
             // 只盯 childList 会漏掉，导致「点开/关闭塔图后顺序短暂恢复」要等心跳才补。
             if (r.type === 'attributes') {
@@ -13403,11 +14406,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           state.timer = setTimeout(() => {
             state.timer = null;
             gxReapply(doc, false);
+            // 站点整块重绘（换页 / 换角色 / 重排卡片）会把置顶按钮和星之力胶囊冲掉，
+            // 这里顺手补一次，别等下一轮 tick
+            pinDecorKick();
           }, 40);
         });
         mo.observe(doc.body, {
           childList: true, subtree: true,
           attributes: true, attributeFilter: ['style', 'class'],
+          // ★ 必须盯文本：新版 React 重渲染时大多只改文本节点（收益率 ←→ 星之力），
+          // 不换元素、不改 style，只看 childList/attributes 会完全漏掉，
+          // 那就只能等 1.2 秒心跳才补回来 —— 用户看到的就是「先闪两下收益率」。
+          characterData: true,
         });
       } catch (e) {
         continue;
@@ -14204,9 +15214,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   /** 兜底：按封面哈希在页面上找同图卡片，反推角色 ID。
    *  LINK 连接卡 / 个人主页圣殿列表常常没有当前角色页上下文，
    *  以前会退化成 currentCharacterId()，ID 不对就整个工具条不挂。 */
+  const tgCidCoverCache = new Map();
   function tgCidByCover(cover) {
     const key = String(cover || '').match(/cover\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/i);
     if (!key) return '';
+    const __ck = key[0];
+    const __hit = tgCidCoverCache.get(__ck);
+    if (__hit && Date.now() - __hit.at < 300000) return __hit.cid;
+    const __r = tgCidByCoverRaw(__ck, key);
+    tgCidCoverCache.set(__ck, { at: Date.now(), cid: __r });
+    return __r;
+  }
+  function tgCidByCoverRaw(key, keyMatch) {
     for (const d of allDocs()) {
       let els = [];
       try { els = d.querySelectorAll('[data-id],[data-character-id],[style*="cover"],img[src*="cover"]'); }
@@ -14214,7 +15233,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       for (const el of els) {
         const st = String((el.style && el.style.backgroundImage) || '') + ' ' +
           String(el.getAttribute('style') || '') + ' ' + String(el.getAttribute('src') || '');
-        if (!st.includes(key[0])) continue;
+        if (!st.includes(keyMatch[0])) continue;
         for (let up = el, i = 0; i < 4 && up; i++, up = up.parentElement) {
           if (!up.getAttribute) break;
           const v = String(up.getAttribute('data-id') || '');
@@ -15057,7 +16076,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const st = d.createElement('style');
       st.id = 'tgtk-gifov-style';
       st.textContent = '.tgtk-gifov{position:absolute;inset:0;z-index:1;pointer-events:none}' +
-        '.tgtk-gifov img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}';
+        '.tgtk-gifov img{display:block;width:100%;height:100%;object-fit:cover;object-position:top}' +
+        /* 旧版的塔图是 .card 的 background-image，卡里还有 .tag / .buff / .line 这些定位元素：
+           覆盖层必须排在最下面（z-index:0 + 抢在第一位插入），否则会把它们盖住 */
+        '.tgtk-gifov.tgtk-gifov-old{z-index:0}';
       (d.head || d.documentElement).appendChild(st);
     } catch (e) {}
   }
@@ -15111,6 +16133,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   }
   function gcSync(box) {
     if (!box) return;
+    // 旧版的盒子（.card / 浮窗 .container）里本来就有 img.cover，不能按「有 img 就是在播原图」判
+    if (box.__tgtkGifOld) { gcShow(box, true); return; }
     const playing = gcPlaying(box);
     const group = gcLinkBoxes(box);
     if (group) { group.forEach((b) => gcShow(b, !playing)); return; }
@@ -15126,23 +16150,30 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       else TGGC.warmed[url] = im;
     } catch (e) {}
   }
-  function gcMount(box, url) {
+  function gcMount(box, url, old) {
     if (!box) return;
     gcWarm(url);
     const d = box.ownerDocument || HDOC;
     gcDocStyle(d);
+    if (old) box.__tgtkGifOld = 1;
     let ov = box.querySelector('.tgtk-gifov');
     if (!ov) {
       ov = d.createElement('div');
-      ov.className = 'tgtk-gifov';
+      ov.className = 'tgtk-gifov' + (old ? ' tgtk-gifov-old' : '');
       const im = d.createElement('img');
       im.alt = '';
       im.decoding = 'sync';
       ov.appendChild(im);
-      // 插在 canvas 之后、播放键之前：压住塔图，又被站点 z-10 的播放键压住
-      const btn = box.querySelector('button');
-      if (btn) box.insertBefore(ov, btn); else box.appendChild(ov);
+      if (old) {
+        // 旧版卡片：抢在第一位，站点自己的 .tag / .buff / .line 才会画在覆盖层上面
+        box.insertBefore(ov, box.firstChild);
+      } else {
+        // 插在 canvas 之后、播放键之前：压住塔图，又被站点 z-10 的播放键压住
+        const btn = box.querySelector('button');
+        if (btn) box.insertBefore(ov, btn); else box.appendChild(ov);
+      }
     }
+    if (old && !ov.classList.contains('tgtk-gifov-old')) ov.classList.add('tgtk-gifov-old');
     const img = ov.querySelector('img');
     if (url && img.__tgtkU !== url) { img.src = url; img.__tgtkU = url; }
     if (!ov.__tgtkMo) {
@@ -15153,6 +16184,49 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     }
     gcSync(box);
   }
+  /** 旧版塔卡：塔图就是 .card 的背景图，卡里还压着 .tag / .buff / .line 这些子节点。
+   *  直接插一个绝对定位的覆盖层会把它们盖掉（真机试过），所以改成
+   *  **把贴图当成最上面那一层背景图** 叠上去 —— 背景永远画在内容下面，站点的标签一个都不会被挡。 */
+  function gcPaintOldCard(card, url) {
+    const cur = String(card.style.backgroundImage || '');
+    let base = cur;
+    if (/^url\(["']?data:image\//i.test(cur)) {
+      // 已经叠过我们那层（data URL）：基底用记下来的那份
+      base = card.__tgtkGifBase != null ? card.__tgtkGifBase : cur.slice(cur.indexOf('),') + 1);
+    } else {
+      card.__tgtkGifBase = cur;   // 站点自己的那层，先记下来
+    }
+    const want = 'url("' + url + '"),' + base;
+    if (cur !== want) card.style.backgroundImage = want;
+  }
+  /** 清掉贴图时把卡片背景还原成站点原来那层 */
+  function gcUnpaintOldCards(d) {
+    let cards = [];
+    try { cards = d.querySelectorAll('.item[data-id] .card[data-id]'); } catch (e) { return; }
+    for (let i = 0; i < cards.length; i++) {
+      const card = cards[i];
+      if (card.__tgtkGifBase == null) continue;
+      try { card.style.backgroundImage = card.__tgtkGifBase; } catch (e) {}
+      card.__tgtkGifBase = null;
+    }
+  }
+  /** 旧版（jQuery）那一套：塔卡是 .item[data-id=塔主#角色] .card（背景图，没有 img / canvas）。
+   *  新版那套 #tg-temple / canvas 在旧版页面里一个都没有，所以必须单独走一遍。
+   *  **只贴列表里的卡，不贴塔图浮窗**（#TB_window.temple）：和新版一致 —— 外面看是贴的图，
+   *  点开塔图看到的还是站点原本那张（用户 2026-11-19 要求）。 */
+  function gcApplyOld(d) {
+    let cards = [];
+    try { cards = d.querySelectorAll('.item[data-id] .card[data-id]'); } catch (e) { cards = []; }
+    for (let i = 0; i < cards.length; i++) {
+      const card = cards[i];
+      const m = /^(\d+)#(\d+)$/.exec(String(card.getAttribute('data-id') || ''));
+      if (!m) continue; // 旧版 LINK 卡是 cid_uid（两半拼图），一律不贴
+      const cid = m[2];
+      const url = TGGC.binds[cid + ':' + m[1]] || TGGC.binds[cid + ':*'];
+      if (url) gcPaintOldCard(card, url);
+    }
+  }
+
   function gcApplyAll() {
     if (!Object.keys(TGGC.binds).length) return;
     for (const d of allDocs()) {
@@ -15167,6 +16241,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         const box = gcCoverBox(host);
         if (box) gcMount(box, url);
       }
+      gcApplyOld(d);
     }
     // 掉出页面的观察器（React 重建后旧节点会断开）
     TGGC.obs = TGGC.obs.filter((o) => {
@@ -15178,6 +16253,15 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function gcTempleish(node) {
     if (!node || node.nodeType !== 1) return false;
     if (/^tg-temple/.test(node.id || '')) return true;
+    // 旧版：塔卡（.card 的 background-image，data-id=塔主id#角色id）
+    try {
+      if (node.matches) {
+        if (node.matches('.card[data-id]')) return true;
+        // 旧版一次请求是往 <ul class="grail_list"> 里塞 24 个 <div class="item" data-id="塔主#角色">。
+        // 只认 .card 的话这些行全靠 1.5 秒一次的兜底扫描补上 —— 刷新后贴图慢一拍（1 秒左右）就是这么来的。
+        if (node.matches('.item[data-id], .grail_list')) return true;
+      }
+    } catch (e) {}
     return !!(node.querySelector && node.querySelector(GC_SEL));
   }
   function gcDocMutation(muts) {
@@ -15210,6 +16294,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           const mo = new MutationObserver(gcDocMutation);
           mo.observe(d.documentElement, { childList: true, subtree: true });
           TGGC.mos.push(mo);
+        } catch (e) {}
+        /* 旧版切 tab / 翻页都是把缓存好的那一页 .show() 出来：DOM 一个节点都没新增，
+           观察器完全抓不到，只能等 1.5 秒的兜底扫描 —— 这就是「有时慢一秒」的另一半原因。
+           点这些地方的时候顺手补两次（站点请求回来大约 100~300ms）。 */
+        try {
+          d.addEventListener('click', (e) => {
+            try {
+              if (!Object.keys(TGGC.binds).length) return;
+              const t = e.target;
+              const hit = t && t.closest && t.closest('.grail_user_tab, #pager1, .item[data-id], .grail_list');
+              if (!hit) return;
+              setTimeout(() => { try { gcApplyAll(); } catch (err) {} }, 60);
+              setTimeout(() => { try { gcApplyAll(); } catch (err) {} }, 320);
+            } catch (err) {}
+          }, true);
         } catch (e) {}
       }
     };
@@ -15260,6 +16359,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       try {
         const list = d.querySelectorAll('.tgtk-gifov');
         for (let i = 0; i < list.length; i++) list[i].remove();
+        gcUnpaintOldCards(d);
       } catch (e) {}
     }
     gcSaveBinds();
@@ -15356,7 +16456,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     let gifPlaying = false;
     let gifTimer = 0;
     let gifTok = 0;                  // 取帧竞态保护
-    let gifOnly = false;             // 只更换封面：只贴图，不重新生成 GIF
+    let gifOnly = true;              // 只更换封面：默认勾上，只贴图、不重新生成 GIF
     let gifBusy = false;
     let fitGap = null;               // LINK：用留白把浮窗总高锁在开窗那一刻（盒子建好后赋值）
 
@@ -15412,7 +16512,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const gifOpen = tgH(cropDoc, 'a', { class: 'tgtk-crop-openlink', href: '#', target: '_blank',
       rel: 'noopener noreferrer', title: '在新标签打开本塔的 GIF，另存后拖进上面的黑色区域' }, '本塔GIF可另存后拖入');
     const gifOpenRow = tgH(cropDoc, 'div', { class: 'tgtk-crop-tip', hidden: '' }, gifOpen);
-    const gifOnlyChk = tgH(cropDoc, 'input', { type: 'checkbox', 'data-tgtk': '1' });
+    // 默认勾上「只更换封面」（用户 2026-11-19）：绝大多数人只是想要一张封面，
+    // 不想把站点上的 GIF 也换成一张静止图 —— 那等于把动图弄坏了。
+    const gifOnlyChk = tgH(cropDoc, 'input', { type: 'checkbox', checked: 'checked', 'data-tgtk': '1' });
     const gifOnlyRow = tgH(cropDoc, 'label', { class: 'tgtk-crop-chk', hidden: '' }, gifOnlyChk,
       tgH(cropDoc, 'span', null, '只更换封面（只在本机贴图，不改站点上的 GIF）'));
     const stage = tgH(cropDoc, 'div', { class: 'tgtk-crop-stage' }, cvs,
@@ -15464,10 +16566,16 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const refreshTip = () => {
       if (link) { tip.textContent = ''; return; }   // LINK 不要说明行（用户要求），信息都在按键和帧信息里
       if (gifMode) {
+        /* 旧版小圣杯的塔图是 background-image，站点也不接受 GIF 塔图：
+           这里只给一句短提示，别让人以为「换了 GIF 没生效」是 bug */
+        if (target.kind === 'old') {
+          tip.textContent = '旧版不支持 GIF 塔图：拖入 .gif 选一帧贴成封面即可（只在本机生效）';
+          return;
+        }
         /* 选帧界面里放进来的是一张静态图：勾了只贴图，不勾就直接换塔图 */
         if (st.img && !st.animated) {
           tip.textContent = gifOnly
-            ? '静态图：只在本机贴图，站点上的塔图不动'
+            ? '静态图：只在本机贴图，站点上的塔图不动（取消「只更换封面」才直接换塔图）'
             : '静态图：直接更换塔图，不贴图（勾「只更换封面」才贴）';
           return;
         }
@@ -16808,9 +17916,70 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function mergeBotList(incoming) {
     return mergeIdList(incoming, 'bots');
   }
-  /** 个人页要不要按工具箱的名单重排：置顶（开关打开且有名单）或置底（有名单）任一成立 */
+
+  /* ---- 圣殿定位：从筛塔点「定位」→ 个人页把这座塔临时排到第 1 页最前 ----
+   * 只改**显示顺序**，绝不写置顶 / 置底名单：定位期间这几座塔临时排在最前，
+   * 点图钉 / 提示条上的「取消全部定位」就回到原样（用户 2026-11-19：不要 5 分钟自动失效）。
+   * 为什么要改顺序：个人页是分页的（每页 24 座），不在当前页的塔 DOM 里根本没有，
+   * 没法「滚动过去」；而分页重写这条链路置顶功能已经跑熟了，复用它最稳。 */
+  const LS_LOCATE = 'tgtk:locate:v1';
+  let locateScrolledFor = ''; // 已经滚动过的 cid（每个定位只滚一次）
+  function pinLocateGet() {
+    let o = null;
+    try { o = JSON.parse(localStorage.getItem(LS_LOCATE) || 'null'); } catch (e) {}
+    if (!o) return null;
+    // 兼容旧格式 { cid }；新格式 { cids: [...] }
+    let list = Array.isArray(o.cids) ? o.cids.slice() : (o.cid ? [o.cid] : []);
+    list = list.map((x) => String(x)).filter((x) => /^\d+$/.test(x));
+    if (!list.length) return null;
+    return { cids: list, at: num(o.at) };
+  }
+  /** 加一个（放最前面：刚点的那座排第一） */
+  function pinLocateSet(cid) {
+    const id = String(cid);
+    if (!/^\d+$/.test(id)) return;
+    const cur = pinLocateGet();
+    const list = (cur ? cur.cids.filter((x) => x !== id) : []);
+    list.unshift(id);
+    const o = { cids: list.slice(0, 30), at: Date.now() };
+    try { localStorage.setItem(LS_LOCATE, JSON.stringify(o)); } catch (e) {}
+    locateScrolledFor = '';
+  }
+  /** 去掉一个 */
+  function pinLocateRemove(cid) {
+    const id = String(cid);
+    const cur = pinLocateGet();
+    if (!cur) return;
+    const list = cur.cids.filter((x) => x !== id);
+    try {
+      if (list.length) localStorage.setItem(LS_LOCATE, JSON.stringify({ cids: list, at: Date.now() }));
+      else localStorage.removeItem(LS_LOCATE);
+    } catch (e) {}
+    locateScrolledFor = '';
+  }
+  function pinLocateHas(cid) {
+    const cur = pinLocateGet();
+    return !!cur && cur.cids.indexOf(String(cid)) >= 0;
+  }
+  function pinLocateClear() {
+    try { localStorage.removeItem(LS_LOCATE); } catch (e) {}
+    locateScrolledFor = '';
+    // 立刻收掉高亮和提示条：用户点了「恢复原顺序」就该马上恢复，别等下一轮 tick
+    try {
+      for (const d of allDocs()) {
+        d.querySelectorAll('.tgtk-locate-name').forEach((x) => x.classList.remove('tgtk-locate-name'));
+        d.querySelectorAll('.tgtk-locate-hit').forEach((x) => x.classList.remove('tgtk-locate-hit', 'tgtk-locate-done'));
+        const bar = d.getElementById('tgtk-locate-bar');
+        if (bar) bar.remove();
+      }
+    } catch (e) {}
+    locateWasActive = false;
+  }
+
+  /** 个人页要不要按工具箱的名单重排：置顶（开关打开且有名单）、置底（有名单）、
+   *  或正在临时定位，任一成立。定位必须独立于置顶开关，否则关掉置顶就没法定位。 */
   function pinOn() {
-    return (TUI.on && TUI.pins.length > 0) || TUI.bots.length > 0;
+    return (TUI.on && TUI.pins.length > 0) || TUI.bots.length > 0 || !!pinLocateGet();
   }
   /** 我到底有没有这座塔。先看已经拉过的全量队列（不发请求），认不出我是谁再拉一次；
    *  全都拿不到时返回 null —— 这时不做拦截，免得把正常的置顶误判成「没塔」。 */
@@ -16976,6 +18145,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function pinOrdered(all) {
     const used = Object.create(null);
     const head = [];
+    // 临时定位排在最前（优先于置顶），并从置顶 / 置底名单里临时摘掉，
+    // 免得同一座塔在一页里出现两次。名单本身一个字都不改。
+    const loc = pinLocateGet();
+    if (loc) {
+      // 可以同时定位多座：按「最近点的在前」排到最前面
+      for (const cid of loc.cids) {
+        if (used[cid]) continue;
+        const it = all.find((x) => x && String(x.CharacterId) === cid) || pinSnapGet(cid);
+        if (!it) continue;
+        used[cid] = 1;
+        head.push(it);
+      }
+    }
     // 置顶开关关掉时只跳过「置顶」，置底照常生效
     if (TUI.on) {
       for (let i = 0; i < TUI.pins.length; i++) {
@@ -17000,6 +18182,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     if (TUI.bots.length) {
       const tail = [];
       TUI.bots.forEach((cid) => {
+        if (head.some((x) => x && String(x.CharacterId) === cid)) return; // 已排到最前（定位/置顶）
         const at = rest.findIndex((x) => x && String(x.CharacterId) === cid);
         if (at >= 0) {
           tail.push(rest[at]);
@@ -17311,6 +18494,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     tuiSave();
     if (on) pinRefreshSnaps();
     if (pinUiRefresh) pinUiRefresh();
+    // 个人圣殿页开着就当场重排，不用用户自己刷新（置顶落在第 1 页最前）
+    templeLiveRefresh(on);
     return on;
   }
 
@@ -17335,6 +18520,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     tuiSave();
     if (on) pinRefreshSnaps();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(false);
     return on;
   }
 
@@ -17350,6 +18536,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     TUI.pins = list;
     tuiSave();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(false);
   }
 
   /** 拖拽排序：把 from 挪到 to 的前面（before=true）或后面 */
@@ -17367,6 +18554,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     TUI.pins = list;
     tuiSave();
     if (pinUiRefresh) pinUiRefresh();
+    templeLiveRefresh(false);
   }
 
   let pinDragFrom = '';
@@ -17669,7 +18857,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           e.stopPropagation();
           if (e.stopImmediatePropagation) e.stopImmediatePropagation();
           const on = pinToggle(cid, null);
-          pinToast(on ? '已置顶，刷新个人页生效' : '已取消置顶，刷新个人页生效');
+          pinToast(on ? '已置顶：已排到第 1 页最前' : '已取消置顶');
         },
         true
       );
@@ -17866,6 +19054,19 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
    *  旧版 data-id = uid#cid；都对不上再看 .name 里的 @塔主 链接 */
   function starOfCharaCard(card) {
     if (!card || !card.getAttribute) return null;
+    // 每张卡要跑两次子查询（.name a[href*=user] 和 [title*=星之力]，后者是属性子串匹配，很贵）。
+    // 圣殿上千座时一轮就是几千次 DOM 查询，而星之力表没变时结果完全一样 —— 按卡缓存。
+    // 失效条件：表换了（starCharaCid / starCharaAt 变）或过了 60 秒时间片
+    // （站点可能在同一节点上原地更新星标 title）。
+    let __c = null;
+    try { __c = card.__tgtkStarC || null; } catch (e) {}
+    const __stamp = starCharaCid + '@' + starCharaAt + '#' + ((Date.now() / 60000) | 0);
+    if (__c && __c.s === __stamp) return __c.v;
+    const __v = starOfCharaCardSlow(card);
+    try { card.__tgtkStarC = { s: __stamp, v: __v }; } catch (e) {}
+    return __v;
+  }
+  function starOfCharaCardSlow(card) {
     let uid = String(card.getAttribute('data-user-id') || '');
     const raw = String(card.getAttribute('data-id') || '');
     if (!uid) {
@@ -17914,7 +19115,38 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return /^\d+$/.test(v) ? v : '';
   }
 
-  /** 这是不是角色页：地址 /character/xxx（新版也有 #/character/xxx）。
+  /** 角色浮窗（在 /rakuen 之类页面上点开的那种）——里面是同一个角色的圣殿 / 董事会，
+   *  数据口径和角色页一样，但地址栏还是原页面，光看 URL 认不出来。
+   *  找到可见的浮窗就返回它，找不到返回整个文档。 */
+  function starCharaScope(d) {
+    try {
+      // 旧版浮窗是 div.dialog > div#grailBox.chara{ID}（DOM 截图），新版是 daisyUI 的 #tg-modal
+      const mods = d.querySelectorAll(
+        '#tg-modal, [id^="tg-modal"], dialog.tinygrail, [id*="character-modal" i], #TB_window, ' +
+        '.dialog, .new_dialog'
+      );
+      for (let i = mods.length - 1; i >= 0; i--) {
+        const m = mods[i];
+        if (!m || !m.isConnected) continue;
+        // ⚠️ 顺序很重要：先看里面有没有角色内容（树查询，一两毫秒），再判可见。
+        // tgNodeVisible 走 getBoundingClientRect，布局脏的时候会强制整页重排 ——
+        // 上千张卡的页面上实测一次 21ms。旧版塔图弹窗 #TB_window 也在这份候选里，
+        // 顺序反过来的话，点开一张塔图就会让每一轮 tick 白付一次重排（v2.3.65）。
+        const box = m.querySelector('#grailBox, [id^="grailBox"]');
+        if (box && /(^|\s)chara\d+(\s|$)/.test(String(box.className || ''))) {
+          if (tgNodeVisible(m)) return m;
+          continue;
+        }
+        if (!m.querySelector(
+          '[id^="tg-trade-box"], [id^="tg-ico-box"], [id^="tg-character"], [data-character-id]'
+        )) continue;
+        if (tgNodeVisible(m)) return m;
+      }
+    } catch (e) {}
+    return d;
+  }
+
+  /** 这是不是角色页：地址 /character/xxx（新版也有 #/character/xxx），或者开着角色浮窗。
    *  个人页地址带 /user/，乐园超展开都不带，不能混为一谈。 */
   function starPageIsChara(d) {
     try {
@@ -17922,6 +19154,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       if (/\/user\//.test(p)) return false;
       if (/\/character\/|\/chara\//i.test(p)) return true;
     } catch (e) {}
+    // 角色浮窗：地址还停在 /rakuen，但屏幕上就是一个角色
+    if (starCharaScope(d) !== d) return true;
     try {
       // 没有 URL 可依时的判据：角色页的圣殿列表是一堆 data-id=uid#cid 的老式卡
       if (d.querySelector('[id^="tg-trade-box-temple"] > .item')) return true;
@@ -17983,18 +19217,22 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       const br = root.getBoundingClientRect();
       if (br.width < 40) return null;
       const kids = root.querySelectorAll('*');
+      let any = null;
       for (let i = 0; i < kids.length; i++) {
         const k = kids[i];
         if (k.childElementCount) continue;
         if (k.classList && k.classList.contains('tgtk-pinpill')) continue;
+        if (k.classList && k.classList.contains('tgtk-starbadge')) continue;
         const el = ok(k);
         if (!el) continue;
         const r = el.getBoundingClientRect();
         if (r.left < br.left + br.width * 0.4) continue; // 只认右半
         if (r.top < br.top + br.height * 0.35) continue; // 和下半区
-        return el;
+        // 新版卡右下角堆着两枚胶囊（+9.75 收益率 / 400 之类），收益率一定带正负号
+        if (/^[+\-–—]/.test(String(k.textContent || '').trim())) return el;
+        if (!any) any = el;
       }
-      return null;
+      return any;
     };
     let pos = byPos(box);
     // 塔图那一块认错时（胶囊其实挂在卡片上）再按整张卡找一次
@@ -18007,9 +19245,26 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return ok(hit);
   }
 
+  /** 已经画成星之力的元素 + 它应该显示的数值。
+   *  站点（新版 React）重渲染时常常只把文本改回「收益率」，observer 靠这张表当场改回来 ——
+   *  不这么做就只能等 1.2 秒心跳，肉眼看到的就是闪。 */
+  const paintedStarEls = new WeakSet();
+  /** 画过星之力的**卡片** → { star, el }。新版 React 有时不是改文本，而是**换掉整个胶囊元素**，
+   *  这时按元素对不上号，只能回到卡片这一级重画（同步做，仍在同一帧内）。 */
+  const paintedStarCards = new WeakMap();
+  let starSyncBusy = false;
+  /** 从变化节点往上找「画过星之力的那张卡」 */
+  function paintedCardOf(node) {
+    let n = node;
+    for (let i = 0; i < 9 && n; i++, n = n.parentElement) {
+      if (paintedStarCards.has(n)) return n;
+    }
+    return null;
+  }
+
   function starPillPaint(card, star) {
     const box = pinCoverBox(card) || card;
-    if (!box || !box.getBoundingClientRect) return;
+    if (!box || !box.getBoundingClientRect) return false;
     let el = null;
     try {
       el = card.__tgtkStarEl || null;
@@ -18020,7 +19275,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         card.__tgtkStarEl = el;
       } catch (e) {}
     }
-    if (!el) return;
+    if (!el) return false;
     const tier = star >= 10000 ? 0 : star > 0 ? 1 : 2;
     // 记住站点原来的数字 / title，关掉开关时原样还回去
     if (!el.hasAttribute('data-tgtk-ori')) el.setAttribute('data-tgtk-ori', String(el.textContent || ''));
@@ -18031,28 +19286,69 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const txt = String(Math.round(num(star)));
     const changed = el.textContent !== txt;
     if (changed) el.textContent = txt;
+    // 登记一下：站点把这段文本改回收益率时，observer 要在同一个微任务里改回来
+    paintedStarEls.add(el);
+    try { el.__tgtkStarVal = txt; } catch (e) {}
+    // 卡片级也记一份：站点换掉整个胶囊元素时，只能靠这张卡重画
+    try { paintedStarCards.set(card, { star: num(star), el }); } catch (e) {}
+    // 颜色每次都要写（站点重绘会冲掉）
     el.style.setProperty('background', STAR_TIERS[tier].bg, 'important');
     el.style.setProperty('border-color', STAR_TIERS[tier].bd, 'important');
     el.style.setProperty('color', '#fff', 'important');
-    el.style.setProperty('padding', '1px 5px', 'important');
-    el.style.setProperty('font-size', '10px', 'important');
-    el.style.setProperty('line-height', '1.5', 'important');
-    el.style.setProperty('white-space', 'nowrap', 'important');
-    el.style.setProperty('text-shadow', '0 1px 2px rgba(0,0,0,.35)', 'important');
-    // 站点把胶囊宽度写死了，位数一多就截断：放宽 + 给个最小宽度，
-    // 只贡献几十点的塔也不会缩成一粒小点
-    el.style.setProperty('width', 'auto', 'important');
-    el.style.setProperty('max-width', 'none', 'important');
-    el.style.setProperty('min-width', '34px', 'important');
-    el.style.setProperty('box-sizing', 'border-box', 'important');
-    el.style.setProperty('text-align', 'center', 'important');
-    el.style.setProperty('text-overflow', 'clip', 'important');
-    el.style.setProperty('overflow', 'visible', 'important');
-    // 站位也是按原来的字数算死的（左侧定位、右边贴边）：位数一多就往右溢出，
-    // 最后一位被卡片的 overflow 裁掉。压到卡片边界就改成右锚，让它向左边长。
-    if (changed || !el.style.right) {
+    /* ⚠️ 尺寸类样式**只设一次**：每次心跳都重设 padding / font-size / width / min-width，
+       会让整块固定资产区域重新布局 —— 用户看到的就是「固资区域抖动 + 字体闪两下」。
+       同一颗胶囊（站点只改文本）设过一次就够；站点换了新元素才会再设一遍。 */
+    if (!el.__tgtkStarSized) {
+      el.__tgtkStarSized = 1;
+      el.style.setProperty('padding', '1px 5px', 'important');
+      el.style.setProperty('font-size', '10px', 'important');
+      el.style.setProperty('line-height', '1.5', 'important');
+      el.style.setProperty('white-space', 'nowrap', 'important');
+      el.style.setProperty('text-shadow', '0 1px 2px rgba(0,0,0,.35)', 'important');
+      // 两边都圆：新版那枚胶囊是「左圆右直」（右边贴死在卡片上），看着像被切了一刀；
+      // 旧版 .buff 本来就是圆角，别动它
+      if (!(el.classList && el.classList.contains('buff'))) {
+        el.style.setProperty('border-radius', '999px', 'important');
+      }
+      // 压在 GIF 贴图覆盖层（.tgtk-gifov，z-index:1）之上，贴过封面也看得见
+      el.style.setProperty('z-index', '8', 'important');
       try {
-        const host = box.getBoundingClientRect();
+        const cs = (el.ownerDocument.defaultView || window).getComputedStyle(el);
+        if (cs.position === 'static') el.style.setProperty('position', 'relative', 'important');
+      } catch (e) {}
+      // 站点把胶囊宽度写死了，位数一多就截断：放宽 + 给个最小宽度，
+      // 只贡献几十点的塔也不会缩成一粒小点
+      el.style.setProperty('width', 'auto', 'important');
+      el.style.setProperty('max-width', 'none', 'important');
+      el.style.setProperty('min-width', '34px', 'important');
+      el.style.setProperty('box-sizing', 'border-box', 'important');
+      el.style.setProperty('text-align', 'center', 'important');
+      el.style.setProperty('text-overflow', 'clip', 'important');
+      el.style.setProperty('overflow', 'visible', 'important');
+    }
+    // 站位也是按原来的字数算死的（左边定位、右边贴边）：位数一多就往右溢出，
+    // 最后一位被卡片的 overflow 裁掉。压到卡片边界就改成右锚，让它向左边长；
+    // 站点没给定位（position:static）时 right 不生效，再用 transform 往回挪一点。
+    if (changed || !el.hasAttribute('data-tgtk-fit')) {
+      try {
+        // 真正的裁切边界：最近一层 overflow 不是 visible 的祖先（更宽的不算）
+        let host = box.getBoundingClientRect();
+        const dv = el.ownerDocument.defaultView || window;
+        for (let n = el.parentElement, i = 0; n && n !== box && i < 5; n = n.parentElement, i++) {
+          let cs2 = null;
+          try {
+            cs2 = dv.getComputedStyle(n);
+          } catch (e) {
+            break;
+          }
+          if (cs2.overflowX !== 'visible' || cs2.overflowY !== 'visible') {
+            const r2 = n.getBoundingClientRect();
+            if (r2.width && r2.right < host.right) host = r2;
+            break;
+          }
+        }
+        // 先清掉上次的位移，不然量到的是挪过之后的数
+        el.style.removeProperty('transform');
         if (el.getBoundingClientRect().right > host.right - 1) {
           el.style.setProperty('left', 'auto', 'important');
           el.style.setProperty('right', '3px', 'important');
@@ -18060,10 +19356,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         if (el.scrollWidth > el.clientWidth + 1) {
           el.style.setProperty('width', 'max-content', 'important');
         }
+        const over = Math.ceil(el.getBoundingClientRect().right - (host.right - 6));
+        if (over > 0) el.style.setProperty('transform', `translateX(-${over}px)`, 'important');
+        el.setAttribute('data-tgtk-fit', '1');
       } catch (e) {}
     }
     const tip = `星之力 ${fmt(star)} · ${star >= 10000 ? '已冲星' : star > 0 ? '有贡献' : '未冲星'}`;
     if (el.title !== tip) el.title = tip;
+    return true;
   }
 
   /** 关掉开关：把被换掉的收益率数字原样还回去，颜色也交回站点 */
@@ -18077,11 +19377,12 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           el.removeAttribute('data-tgtk-ori');
           ['background', 'border-color', 'color', 'padding', 'font-size', 'line-height', 'white-space', 'text-shadow',
             'width', 'min-width', 'max-width', 'box-sizing', 'text-align', 'text-overflow', 'overflow',
-            'left', 'right'].forEach((k) => {
+            'left', 'right', 'transform', 'border-radius', 'z-index', 'position'].forEach((k) => {
             try {
               el.style.removeProperty(k);
             } catch (e) {}
           });
+          el.removeAttribute('data-tgtk-fit');
           const ti = el.getAttribute('data-tgtk-orititle');
           if (ti) el.setAttribute('title', ti);
           else el.removeAttribute('title');
@@ -18096,20 +19397,858 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     starCharaAt = 0;
     starOwner = '';
     starLoadedAt = 0;
+    starBadgeRemove();
+  }
+
+  /* ---- 旧版角标的清理 ---- */
+  const STAR_BADGE_CLS = 'tgtk-starbadge';
+  function starBadgeRemove() {
+    for (const d of allDocs()) {
+      try {
+        d.querySelectorAll('.' + STAR_BADGE_CLS).forEach((el) => el.remove());
+      } catch (e) {}
+    }
+  }
+
+  /** 新版卡片取星之力：角色页按塔主对号；个人页用「这个人的全部塔」那张表；
+   *  都没有就读站点自己那颗星标的 title */
+  function starForCard(card, cid, charaPage) {
+    if (charaPage) return starOfCharaCard(card);
+    if (cid && cid in starMap) return starMap[cid];
+    return starOfCharaCard(card);
+  }
+
+  /** 一张卡上画星之力：一律换成站点自己的收益率胶囊 ——
+   *  新版就算没有收益率的塔，也照样挂着这枚胶囊，不需要再自己挂角标 */
+  function starCardPaint(card, star) {
+    starPillPaint(card, star);
+  }
+
+  /* ---------- 角色页 / 浮窗：点「???」看这位的持股 ----------
+   * 站点只公开前 3 名：董事会 / 持股列表里其余人都显示 ???。
+   * 点一下：chara/user/{cid}/{用户名}/false 的 Total 是该用户的持股，
+   * 再拿 chara/{cid} 的 Total（角色总股本）算占比，显示成「64,019 72.74%」（和 tinygrail-magic 一样）。
+   * 再点一下收起。不用悬停：浮窗里卡片会重排、胶囊里还套着小字，enter/leave 收不干净。
+   */
+  const holdListCache = Object.create(null); // cid → { at, items, pages, p }
+  const holdNumCache = Object.create(null); // cid|name → { at, n }
+  const holdTotalCache = Object.create(null); // cid → { at, total }
+
+  function holdTotalOf(cid) {
+    const c = holdTotalCache[cid];
+    if (c && Date.now() - c.at < 300000) return Promise.resolve(c.total);
+    return api(`chara/${cid}`, { timeout: 20000 })
+      .then((v) => {
+        const t = num(v && v.Total);
+        holdTotalCache[cid] = { at: Date.now(), total: t };
+        return t;
+      })
+      .catch(() => 0);
+  }
+
+  function holdListOf(cid, rank) {
+    const c = holdListCache[cid];
+    if (c && c.p) return c.p;
+    if (c && Date.now() - c.at < 300000 && (!rank || c.items.length >= rank || c.pages >= 5)) {
+      return Promise.resolve(c.items);
+    }
+    const prev = c && Date.now() - c.at < 300000 ? c : null;
+    let items = prev ? prev.items.slice() : [];
+    let pages = prev ? prev.pages || 1 : 0;
+    const need = Math.max(1, Math.ceil((rank || 1) / 100));
+    const stop = Math.min(5, Math.max(need, pages + 1));
+    const job = (async () => {
+      for (let p = pages + 1; p <= stop; p++) {
+        const v = await api(`chara/users/${cid}/${p}/100`, { timeout: 20000 });
+        const list = (v && v.Items) || [];
+        items = items.concat(list);
+        pages = p;
+        if (!list.length) break;
+      }
+      holdListCache[cid] = { at: Date.now(), items, pages };
+      return items;
+    })();
+    holdListCache[cid] = { at: (prev && prev.at) || 0, items, pages, p: job };
+    job.catch(() => {
+      const cc = holdListCache[cid];
+      if (cc && cc.p === job) delete holdListCache[cid];
+    });
+    return job;
+  }
+
+  function holdOf(cid, name) {
+    const k = cid + '|' + name;
+    const c = holdNumCache[k];
+    if (c && c.p) return c.p;
+    if (c && Date.now() - c.at < 300000) return Promise.resolve(c.n);
+    const job = api(`chara/user/${cid}/${encodeURIComponent(name)}/false`, { timeout: 20000 })
+      .then((v) => {
+        const n = num(v && (v.Total !== undefined ? v.Total : v.Amount));
+        holdNumCache[k] = { at: Date.now(), n };
+        return n;
+      });
+    holdNumCache[k] = { at: 0, n: 0, p: job };
+    job.catch(() => { delete holdNumCache[k]; });
+    return job;
+  }
+
+  /** 悬停目标是不是那枚「持股」小胶囊。
+   *  新版就一个「???」；旧版是「-- ??%」（站点 Balance 为 0 时把两位都写成 ??），
+   *  所以只认「含 2 个以上问号的短文本」 */
+  const HOLD_QM_RE = /\?{2,}|？{2,}/;
+  function holdBadgeOf(el) {
+    if (!el || el.nodeType !== 1 || !el.getBoundingClientRect) return null;
+    const t = String(el.textContent || '').trim();
+    if (!t || t.length > 10) return null;
+    if (!HOLD_QM_RE.test(t)) return null;
+    if (/\d/.test(t)) return null; // 已经填过数字了
+    const r = el.getBoundingClientRect();
+    if (r.width > 200 || r.height > 48 || r.width < 6) return null;
+    return el;
+  }
+
+  /** 这个盒子里出现过的用户名（/user/xxx，去重，最多看 6 个） */
+  function holdUserNames(root) {
+    const names = [];
+    if (!root || !root.querySelectorAll) return names;
+    try {
+      const links = root.querySelectorAll('a[href*="/user/"]');
+      for (let i = 0; i < links.length && i < 6; i++) {
+        const m = /\/user\/([^/?#]+)/.exec(links[i].getAttribute('href') || '');
+        const nm = m && decodeURIComponent(m[1]);
+        if (nm && names.indexOf(nm) < 0) names.push(nm);
+      }
+    } catch (e) {}
+    return names;
+  }
+
+  /** 这个盒子里还剩下几枚「???」（只数最里层那枚，别把包着它的祖先也算一遍） */
+  function holdPillCount(root) {
+    if (!root || !root.querySelectorAll) return 0;
+    let n = 0;
+    const all = root.querySelectorAll('*');
+    for (let i = 0; i < all.length && i < 400; i++) {
+      const k = all[i];
+      if (!holdBadgeOf(k)) continue;
+      let nested = false;
+      const inner = k.querySelectorAll('*');
+      for (let j = 0; j < inner.length && j < 20; j++) {
+        if (holdBadgeOf(inner[j])) {
+          nested = true;
+          break;
+        }
+      }
+      if (!nested) {
+        n++;
+        if (n > 1) return n; // 够判断了，别把整块董事会都扫一遍
+      }
+    }
+    return n;
+  }
+
+  /** 这一位所在的卡：往上爬到「再往外就跨出这一格」为止。
+   *  三个判据一起用，哪个先越界就停：出现第二个用户名 / 出现第二枚 ??? / 文字太长。
+   *  只看单一判据会认大（整块董事会也「只包着一枚 ?」是可能的），那就取到别人的持股了。 */
+  function holdCardOf(el) {
+    let best = (el && el.parentElement) || el;
+    let p = el && el.parentElement;
+    for (let i = 0; i < 8 && p && p.nodeType === 1; i++, p = p.parentElement) {
+      try {
+        if (!p.contains || !p.contains(el)) break;
+        if (String(p.textContent || '').length > 200) break;
+        if (holdUserNames(p).length > 1) break;
+        if (holdPillCount(p) > 1) break;
+        best = p;
+      } catch (e) {
+        break;
+      }
+    }
+    return best;
+  }
+
+  /** 卡上的排名：旧版董事会写在 .name > a > .title 里（主席那格是文字，跳过） */
+  function holdRankOf(el, cardEl) {
+    if (!cardEl || !cardEl.querySelectorAll) return 0;
+    try {
+      const t = cardEl.querySelector('.title');
+      const v = t ? String(t.textContent || '').trim() : '';
+      if (/^\d{1,4}$/.test(v)) return num(v);
+    } catch (e) {}
+    const walk = cardEl.querySelectorAll('*');
+    for (let i = 0; i < walk.length && i < 40; i++) {
+      const k = walk[i];
+      if (k === el || (k.contains && k.contains(el))) continue;
+      if (k.childElementCount) continue;
+      if (k.classList && k.classList.contains(STAR_BADGE_CLS)) continue;
+      const t = String(k.textContent || '').trim();
+      if (/^\d{1,4}$/.test(t)) return num(t);
+    }
+    return 0;
+  }
+
+  /** 卡里就写着 /user/{用户名}（旧版董事会、新版卡都有），直接拿，不用翻名单。
+   *  **只认「整格只有一个用户名」的卡** —— 否则拿到的是整块董事会里第一个人的链接。 */
+  function holdNameDirect(cardEl) {
+    if (!cardEl) return '';
+    const names = holdUserNames(cardEl);
+    if (names.length === 1) return names[0];
+    try {
+      const nm = cardEl.getAttribute && cardEl.getAttribute('data-user-name');
+      if (nm) return String(nm);
+    } catch (e) {}
+    return '';
+  }
+
+  /** 排名 → 用户名；对不上就按昵称 / uid 在名单里找。
+   *  **昵称必须唯一命中**：命中多个说明这一格认大了，宁可不显示，也不能显示别人的持股。 */
+  function holdNameOf(cardEl, list, rank) {
+    const txt = String((cardEl && cardEl.textContent) || '');
+    let uid = '';
+    try {
+      uid = String((cardEl && cardEl.getAttribute && cardEl.getAttribute('data-user-id')) || '');
+    } catch (e) {}
+    if (uid) {
+      for (let i = 0; i < list.length; i++) {
+        if (String(list[i].Id) === uid) return String(list[i].Name || '');
+      }
+    }
+    const hits = [];
+    for (let i = 0; i < list.length; i++) {
+      const nm = String(list[i].Nickname || '');
+      if (nm && nm.length > 1 && txt.indexOf(nm) >= 0) hits.push(list[i]);
+    }
+    if (hits.length === 1) return String(hits[0].Name || '');
+    if (hits.length > 1) {
+      // 多个都对得上：只有「排名也对得上同一个」时才敢用
+      if (rank && list[rank - 1] && hits.indexOf(list[rank - 1]) >= 0) {
+        return String(list[rank - 1].Name || '');
+      }
+      return '';
+    }
+    if (rank && list[rank - 1] && !list[rank - 1].Nickname) return String(list[rank - 1].Name || '');
+    return '';
+  }
+
+  async function holdShow(el) {
+    if (!el || el.__tgtkHoldBusy) return;
+    const ori = String(el.textContent || '');
+    if (!HOLD_QM_RE.test(ori) || /\d/.test(ori)) return;
+    const cid = currentCharacterId();
+    if (!cid) return;
+    el.__tgtkHoldBusy = 1;
+    try {
+      const cardEl = holdCardOf(el);
+      // 卡里带着 /user/{用户名} 就直接用（旧版董事会就是这样），稳得多
+      let name = holdNameDirect(cardEl);
+      if (!name) {
+        const rank = holdRankOf(el, cardEl);
+        const list = await holdListOf(cid, rank);
+        if (!list.length) return;
+        name = holdNameOf(cardEl, list, rank);
+        if (!name) {
+          // 排名读错 / 这位排在 100 名之后：多翻两页再按昵称找一次
+          const more = await holdListOf(cid, 300);
+          name = holdNameOf(cardEl, more, rank);
+        }
+      }
+      if (!name) return;
+      const n = await holdOf(cid, name);
+      // 等待期间站点可能重绘 / 已经点了回去
+      if (!el.isConnected || String(el.textContent || '') !== ori) return;
+      // 角色总股本：算占比用（拿不到就只显示股数）
+      const total = await holdTotalOf(cid);
+      if (!el.isConnected || String(el.textContent || '') !== ori) return;
+      if (!el.hasAttribute('data-tgtk-hold-ori')) el.setAttribute('data-tgtk-hold-ori', ori);
+      // 旧版写的是「-- ??%」：整格换成「股数 占比%」，和 tinygrail-magic 一致
+      const pct = total > 0 ? (n / total) * 100 : 0;
+      el.textContent = total > 0 ? `${fmt(n)} ${pct.toFixed(2)}%` : fmt(n);
+      el.title = total > 0
+        ? `持股 ${fmt(n)} 股 · 占比 ${pct.toFixed(2)}%（再点一下收起）`
+        : `持股 ${fmt(n)} 股（再点一下收起）`;
+    } catch (e) {
+    } finally {
+      delete el.__tgtkHoldBusy;
+    }
+  }
+
+  function holdRestore(el) {
+    if (!el || !el.hasAttribute || !el.hasAttribute('data-tgtk-hold-ori')) return;
+    el.textContent = el.getAttribute('data-tgtk-hold-ori');
+    el.removeAttribute('data-tgtk-hold-ori');
+    el.removeAttribute('title');
+  }
+
+  /** 点击目标是不是那枚胶囊（或它已经展开的样子）：只认点在自己身上，点在旁边的格子上不算 */
+  function holdClickTarget(el) {
+    let n = el;
+    for (let i = 0; n && n.nodeType === 1 && i < 4; i++, n = n.parentElement) {
+      if (n.hasAttribute && n.hasAttribute('data-tgtk-hold-ori')) return n;
+      if (holdBadgeOf(n)) return n;
+    }
+    return null;
+  }
+
+  /** 点一下「???」查这一位的持股，再点一下收回去。
+   *  不再用悬停：浮窗里卡片会重排、胶囊里还套着小字，悬停的 enter/leave 很难收敛（v2.3.59 及之前踩过）。
+   *  真不是角色上下文时 currentCharacterId() 拿不到，holdShow 自己会退出。 */
+  function holdWire(doc) {
+    if (!doc || doc.__tgtkHold) return;
+    doc.__tgtkHold = true;
+    try {
+      doc.addEventListener('click', (e) => {
+        const t = holdClickTarget(e.target);
+        if (!t) return;
+        // 别让站点自己接了这一下（董事会 / 圣殿卡都有点击行为）
+        try {
+          e.preventDefault();
+          e.stopPropagation();
+        } catch (err) {}
+        const ori = t.getAttribute('data-tgtk-hold-ori');
+        if (ori != null && String(t.textContent || '') !== ori) {
+          holdRestore(t);
+          return;
+        }
+        if (ori != null) t.removeAttribute('data-tgtk-hold-ori'); // 站点重绘把字改回去了
+        holdShow(t);
+      }, true);
+      // 只给个提示（不动数字、不发请求）：让「???」看着能点
+      doc.addEventListener('mouseover', (e) => {
+        let n = e.target;
+        for (let i = 0; n && n.nodeType === 1 && i < 3; i++, n = n.parentElement) {
+          if (n.hasAttribute && n.hasAttribute('data-tgtk-hold-ori')) return;
+          if (holdBadgeOf(n)) {
+            if (!n.title) n.title = '点击查看持股';
+            n.style.cursor = 'pointer';
+            return;
+          }
+        }
+      }, true);
+    } catch (e) {}
   }
 
   let pinDecorAt = 0;
-  function pinDecorTick() {
-    const now = Date.now();
-    if (now - pinDecorAt < 900) return; // 站点每次重绘都会把按钮冲掉，慢一点补，别每轮都扫
-    pinDecorAt = now;
+  let pinDecorKickAt = 0;
+
+  /* ---- 圣殿定位：高亮 + 顶部提示条 ----
+   * 目标是「小圣杯个人浮窗」：在 /rakuen 点自己头像打开的那个（#tg-user-tinygrail），
+   * 不是 bangumi 的 /user/{name} 时光机页。
+   * 那个浮窗的圣殿卡**没有角色链接**（角色名只是 <span>），卡片只能靠
+   * pinCardCid / pinCidByIndex 认 —— 高亮也走同一套，别再拿角色名链接当卡片。 */
+  let locateWasActive = false;
+  /** 定位样式只注入一次（浮窗可能在别的文档 / iframe 里） */
+  function ensureLocateStyle(d) {
+    try {
+      if (!d || d.getElementById('tgtk-locate-style')) return;
+      const st = d.createElement('style');
+      st.id = 'tgtk-locate-style';
+      st.textContent = [
+        /* 定位不用边框 + 角标（用户嫌丑）：只把这座塔的**角色名标粉** */
+        '.tgtk-locate-name{color:#e46fa1 !important;font-weight:700}',
+        '#tgtk-locate-bar{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:2147483005;display:flex;align-items:center;gap:8px;padding:7px 10px 7px 12px;border-radius:10px;background:#fff5f9;color:#a8305f;border:1px solid #f0b6cf;font:12px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 8px 22px rgba(160,80,120,.22)}',
+        '#tgtk-locate-bar b{color:#c2356c}',
+        '#tgtk-locate-bar button{border:1px solid #e46fa1;background:#fff;color:#c2356c;border-radius:6px;padding:2px 8px;font:inherit;font-size:11px;cursor:pointer}',
+        '#tgtk-locate-bar button:hover{background:#ffe8f1}',
+      ].join('\n');
+      (d.head || d.documentElement).appendChild(st);
+    } catch (e) {}
+  }
+
+  /** 个人页的圣殿列表宿主：新版个人浮窗 / 旧版个人页，只认这两种。
+   *  新版通用条件是「容器里有圣殿网格 + 顶部有『N座圣殿』这个 tab」——
+   *  角色浮窗没有这个 tab，混进来会认错人。
+   *  ⚠️ 乐园首页的「通天塔」网格也在 `#grail` 里，不能只按选择器认 ——
+   *  那里的卡片不是塔卡，认错了会出现「点定位没反应」。 */
+  function locateHosts(d) {
+    const out = [];
+    const push = (el) => {
+      if (el && out.indexOf(el) < 0 && tgNodeVisible(el)) out.push(el);
+    };
+    try {
+      d.querySelectorAll('#tg-user-tinygrail, #tg-modal, [id^="tg-modal"], dialog.tinygrail').forEach((el) => {
+        if (!el.querySelector('div.grid.w-full.gap-4')) return;
+        let head = '';
+        try { head = String(el.textContent || '').slice(0, 3000); } catch (e) { head = ''; }
+        if (!/座圣殿/.test(head)) return;
+        push(el);
+      });
+    } catch (e) {}
+    // 旧版个人页：列表里必须有「带固资 / 塔主信息的塔卡」，乐园的图片网格没有这些
+    let onUserPage = false;
+    try {
+      onUserPage = /^\/user\//.test(String((d.defaultView && d.defaultView.location && d.defaultView.location.pathname) || ''));
+    } catch (e) {}
+    try {
+      d.querySelectorAll('#grail .grail_list, #grail .temple_list').forEach((el) => {
+        if (!onUserPage && !el.querySelector('.item[data-id] .title, .item[data-id] .name')) return;
+        if (!el.querySelector('.item[data-id]')) return;
+        push(el);
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  /** 圣殿网格：新版每张卡里都有带 data-character-id 的 #tg-temple，用它认网格 ——
+   *  **不依赖外层容器 id**。而且小圣杯面板常常整个在 iframe 里，
+   *  工具箱的窗口却挂在顶层文档：只看 HDOC 会永远「找不到列表」（v2.3.81 就栽在这）。 */
+  function locateGrids(d) {
+    const out = [];
+    try {
+      d.querySelectorAll('div.grid.w-full.gap-4').forEach((g) => {
+        if (!g.children || !g.children.length) return;
+        for (const card of g.children) {
+          try {
+            // data-sacrifices 只有塔卡有（人物卡 / 连接卡都没有），用它把网格认准：
+            // 人物 tab 的网格也是 grid w-full gap-4，别认错。
+            if (card.querySelector && card.querySelector('[data-character-id][data-sacrifices]')) {
+              out.push(g);
+              return;
+            }
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
+    return out;
+  }
+
+  /** 个人圣殿弹窗的外壳：从「N座圣殿」这个 tab 一路往上爬到直挂 body 的那层。
+   *  必须先锁定它再找网格 —— 乐园首页背景里的「通天塔」网格同样是
+   *  `grid w-full gap-4` 且卡里也有塔，光按网格认会认错（v2.3.82 真机踩过）。 */
+  function locatePanelRoot() {
     for (const d of allDocs()) {
+      let tabs = [];
+      try { tabs = d.querySelectorAll('[role="tab"]'); } catch (e) { continue; }
+      for (const t of tabs) {
+        if (!/座圣殿/.test(String(t.textContent || ''))) continue;
+        if (t.closest && t.closest('#tgtk-panel,#tgtk-fab')) continue;
+        let el = t;
+        let top = t;
+        for (let i = 0; i < 20 && el && el.parentElement && el.parentElement !== d.body; i++) {
+          el = el.parentElement;
+          top = el;
+        }
+        return { doc: d, root: top };
+      }
+    }
+    return null;
+  }
+
+  /** 跨文档找「我的圣殿网格」：先限定在个人圣殿弹窗里，再退到「带分页器的塔网格」。
+   *  弹窗开着但停在别的 tab 时返回 null —— 让调用方去切 tab。 */
+  function locateGridAny() {
+    const p = locatePanelRoot();
+    if (p) {
+      const gs = locateGrids(p.root);
+      if (gs.length) return gs[0];
+      return null;
+    }
+    const cands = [];
+    for (const d of allDocs()) {
+      for (const g of locateGrids(d)) cands.push(g);
+    }
+    for (const g of cands) {
+      try { if (locatePagerOf(g)) return g; } catch (e) {}
+    }
+    return null;
+  }
+
+  /** 跨文档找某座塔的卡 */
+  function locateCardAny(cid) {
+    for (const d of allDocs()) {
+      let c = null;
+      try { c = locateCardOf(d, cid); } catch (e) {}
+      if (c) return c;
+    }
+    return null;
+  }
+
+  /** 这一页有没有「我的圣殿列表」：横幅只在这种情况下出现 */
+  function locateHasList(d) {
+    return locateGrids(d).length > 0 || locateHosts(d).length > 0;
+  }
+  function locateHasAny() {
+    // 只认「个人圣殿弹窗」：乐园首页背景里的通天塔网格也是塔卡，
+    // 用它判断会让横幅在没有个人页的页面上冒出来。
+    if (locatePanelRoot()) return true;
+    return !!locateGridAny();
+  }
+
+  /** 这座塔的卡片：data-* → 封面哈希 → 本批顺序 → 角色名，逐级兜底。
+   *  个人圣殿是**滚动加载**（一批 24 张），滚过几批之后「这批第几个」就对不上了，
+   *  所以封面和名字这两条必须有。也绝不碰工具箱自己的面板
+   *  （那里的角色名是另一套 class，误伤会整列变粉）。 */
+  function locateCardOf(d, cid) {
+    const want = String(cid);
+    const nm = String(pinNameGet(want) || nameCache[want] || charaName(want) || '').trim();
+    const bad = (el) => !!(el && el.closest && el.closest('#tgtk-panel,#tgtk-fab'));
+    const grids = locateGrids(d);
+    for (const host of locateHosts(d)) {
+      // 旧版个人页
+      try {
+        for (const card of host.querySelectorAll('.item')) {
+          if (bad(card)) continue;
+          const c = pinCardCid(card);
+          if (c && String(c) === want) return card;
+        }
+      } catch (e) {}
+    }
+    if (!grids.length) return null;
+
+    const cards = [];
+    for (const g of grids) {
+      for (const card of g.children) {
+        if (!bad(card)) cards.push({ card, g });
+      }
+    }
+    // ① 卡片自带 data-*（最准）。新版网格的子节点是外层包裹 div，
+    //   真正的 #tg-temple 在它里面（带 data-character-id / data-assets / data-sacrifices）。
+    for (const it of cards) {
+      let c = pinCardCid(it.card);
+      if (!c) {
+        try {
+          const inner = it.card.querySelector('[data-character-id], [data-temple-character-id], [data-id]');
+          if (inner) c = pinCardCid(inner);
+        } catch (e) {}
+      }
+      if (c && String(c) === want) return it.card;
+    }
+    // ② 位置映射：把已加载的批次按顺序拼起来（滚动加载是一批批追加的，
+    //    所以第 i 张卡就是拼接后的第 i 个 item）。卡片张数对得上才敢用。
+    try {
+      const seq = [];
+      const pages = Object.keys(pinPages).map(Number).sort((x, y) => x - y);
+      for (const pg of pages) {
+        const rec = pinPages[pg];
+        if (rec && rec.items) for (const it of rec.items) seq.push(it);
+      }
+      if (seq.length === cards.length) {
+        for (let i = 0; i < cards.length; i++) {
+          const it = seq[i];
+          if (it && String(it.CharacterId) === want) return cards[i].card;
+        }
+      }
+    } catch (e) {}
+    // ③ 封面哈希：全量队列里 cid → Cover 是唯一的
+    for (const it of cards) {
+      const c = pinCidByCover(pinCoverKey(pinCardCover(it.card)));
+      if (c && String(c) === want) return it.card;
+    }
+    // ④ 名字只做最后兜底，而且**必须在我自己的塔里唯一**
+    //   —— 角色名会重名，真正唯一的是数字 id（用户明确提醒过）。
+    if (nm) {
+      let dup = 0;
+      const all = pinAllGet();
+      if (all) {
+        for (let i = 0; i < all.length; i++) {
+          const o = all[i];
+          if (o && String(o.CharacterName || o.Name || '').trim() === nm) dup++;
+        }
+      }
+      if (dup === 0 || dup === 1) {
+        for (const it of cards) {
+          const el = locateNameOf(it.card);
+          if (el && String(el.textContent || '').trim() === nm) return it.card;
+        }
+      }
+    }
+    return null;
+  }
+
+  /** 从元素往上找可滚动的那一层：个人浮窗自己带滚动容器，不是 window */
+  function locateScroller(el) {
+    let node = el;
+    for (let i = 0; node && i < 14; i++) {
+      try {
+        if (node.scrollHeight - node.clientHeight > 40) {
+          const view = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+          const oy = view.getComputedStyle(node).overflowY;
+          if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') return node;
+        }
+      } catch (e) {}
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  /** 等站点把下一批卡片画出来：容器变高了、或者目标已经出现就返回 */
+  function locateWaitMore(sc, h0, cid) {
+    return new Promise((resolve) => {
+      let n = 0;
+      const t = setInterval(() => {
+        n++;
+        let grew = false;
+        try { grew = sc.scrollHeight > h0 + 4; } catch (e) {}
+        if (grew || n >= 9) {
+          clearInterval(t);
+          let hit = null;
+          try { hit = locateCardOf(HDOC, cid); } catch (e) {}
+          resolve(hit || null);
+        }
+      }, 110);
+    });
+  }
+
+  /** 找这张卡：当前已加载的直接给；没加载就往下滚，让站点把后面几批画出来。
+   *  （个人圣殿是滚动加载，230 座塔要滚好几屏 —— 只认当前屏会有一半找不到。） */
+  async function locateFindCard(cid, onStep) {
+    let card = null;
+    try { card = locateCardOf(HDOC, cid); } catch (e) {}
+    if (card) return card;
+    const grid0 = locateGridAny();
+    if (!grid0) return null;
+    // 先从网格往上找滚动容器（个人浮窗的滚动层是网格的祖先）；
+    // 找不到再从宿主里挑一个能滚的子容器兜底。
+    const host = grid0.parentElement || grid0;
+    let sc = locateScroller(grid0);
+    if (!sc) {
+      try {
+        for (const el of host.querySelectorAll('div')) {
+          if (el.scrollHeight - el.clientHeight <= 40) continue;
+          const view = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+          const oy = view.getComputedStyle(el).overflowY;
+          if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') { sc = el; break; }
+        }
+      } catch (e) {}
+    }
+    if (!sc) return null;
+    const keep = sc.scrollTop;
+    for (let i = 1; i <= 12; i++) {
+      if (onStep) {
+        try { onStep(i); } catch (e) {}
+      }
+      const h0 = sc.scrollHeight;
+      try { sc.scrollTop = sc.scrollHeight; } catch (e) {}
+      card = await locateWaitMore(sc, h0, cid);
+      if (card) return card;
+    }
+    // 没找到：把视图还原，别把用户的列表滚到最底下
+    try { sc.scrollTop = keep; } catch (e) {}
+    return null;
+  }
+
+  /** 个人浮窗的关闭按钮：只在浮窗容器里按文案找，别去点页面上别的弹窗 */
+  function locatePopClose(host) {
+    const pick = (root) => {
+      if (!root || !root.querySelectorAll) return null;
+      try {
+        for (const b of root.querySelectorAll('button')) {
+          const t = String(b.textContent || '').trim().toLowerCase();
+          if (t !== 'close' && t !== '关闭' && t !== '×' && t !== 'x') continue;
+          if (b.getBoundingClientRect().width) return b;
+        }
+      } catch (e) {}
+      return null;
+    };
+    const inHost = pick(host);
+    if (inHost) return inHost;
+    // 关闭按钮有时在浮窗外壳上（#tg-modal / dialog），往上再找两层
+    let box = host && host.parentElement;
+    for (let i = 0; i < 3 && box; i++, box = box.parentElement) {
+      const got = pick(box);
+      if (got) return got;
+    }
+    return null;
+  }
+
+  /** 我的头像：只在「有退出登录」的账户区里找，而且**只认 role=button 的头像 div**。
+   *  绝不点 <a href="/user/xxx">：那是导航，会把页面带走（v2.3.73 踩过）。 */
+  function locateMyAvatar() {
+    for (const d of allDocs()) {
+      let boxes = [];
+      try { boxes = d.querySelectorAll('div,section,header'); } catch (e) { continue; }
+      for (const box of boxes) {
+        let txt = '';
+        try { txt = String(box.textContent || ''); } catch (e) { continue; }
+        if (txt.length > 1500 || txt.indexOf('退出登录') < 0) continue;
+        let av = null;
+        try { av = box.querySelector('[role="button"][aria-label]'); } catch (e) {}
+        if (av && av.getBoundingClientRect().width) return av;
+      }
+    }
+    return null;
+  }
+
+  /** 关掉个人浮窗再点开头像：让站点重新请求第一页。
+   *  切 tab 会被 React 缓存吃掉（用户实测过），只有关掉重开才一定重新发请求。 */
+  async function locateReopenPop() {
+    const g0 = locateGridAny();
+    const host = g0 ? (g0.parentElement || g0) : null;
+    if (!host) return false;
+    // 顺序很重要：先把「能开回来的头像」拿到手，再关 —— 关了却开不回来最糟
+    const avatar = locateMyAvatar();
+    if (!avatar) return false;
+    const close = locatePopClose(host);
+    if (!close) return false;
+    try { close.click(); } catch (e) { return false; }
+    await sleep(520);
+    try { avatar.click(); } catch (e) { return false; }
+    await sleep(1000);
+    // 顺手切到「N座圣殿」（默认可能停在「连接」上）
+    try {
+      const tab = locateTempleTab();
+      if (tab) tab.click();
+    } catch (e) {}
+    await sleep(900);
+    return !!locateGridAny();
+  }
+
+  /** 点了定位但个人圣殿页还没开：等用户点开自己的头像，就自动接着找 */
+  let locatePending = { cid: '', at: 0 };
+  let locatePendingBusy = false;
+  function locatePendingTry() {
+    if (locatePendingBusy) return;
+    if (!locatePending.cid) return;
+    if (Date.now() - locatePending.at > 30000) {
+      locatePending = { cid: '', at: 0 };
+      return;
+    }
+    if (!locateGridAny()) return;
+    locatePendingBusy = true;
+    const id = locatePending.cid;
+    locatePending = { cid: '', at: 0 };
+    const nm = pinNameGet(id) || nameCache[id] || charaName(id) || '#' + id;
+    locateRun(id, nm).then(
+      () => { locatePendingBusy = false; },
+      () => { locatePendingBusy = false; }
+    );
+  }
+
+  /** 顶部提示条：全局只挂一份，且只在这页真有圣殿列表时出现 */
+  function locateBar(show) {
+    const loc = pinLocateGet();
+    const doc = HDOC;
+    let bar = null;
+    try {
+      bar = doc.getElementById('tgtk-locate-bar');
+    } catch (e) {}
+    if (!loc || !show) {
+      if (bar) bar.remove();
+      return;
+    }
+    if (!bar) {
+      bar = h('div', { id: 'tgtk-locate-bar' }, h('span', null, ''), h('button', { type: 'button' }, '取消全部定位'));
+      bar.querySelector('button').addEventListener('click', () => {
+        pinLocateClear();
+        // 顺手让站点重拉一次当前页：不然列表还停在「定位后」的顺序，要等下次刷新才恢复
+        templeLiveRefresh(false);
+        locateRefreshBtns();
+        try { pinToast('已取消全部定位'); } catch (e) {}
+      });
+      try {
+        (doc.body || doc.documentElement).appendChild(bar);
+      } catch (e) {
+        return;
+      }
+    }
+    // 只报「几座」：名字一长就挤成两行，而且用户自己点的哪几座心里有数
+    const n = (loc.cids || []).length;
+    const want = n > 1 ? `已定位 ${n} 座（都在第 1 页最前）` : `已定位 ${n} 座（在第 1 页最前）`;
+    const txt = bar.querySelector('span');
+    if (txt && txt.textContent !== want) txt.textContent = want;
+  }
+
+  /** 卡片里的角色名：旧版在 .title/.name，新版是卡片里最后一个纯文字 <span>
+   *  （前面是「lv8」「1,260 / 520」这类数字）。定位只把它标粉。 */
+  function locateNameOf(card) {
+    try {
+      if (card.closest && card.closest('#tgtk-panel,#tgtk-fab')) return null;
+      const old = card.querySelector('.title, .name');
+      if (old && String(old.textContent || '').trim()) {
+        if (!(old.closest && old.closest('#tgtk-panel,#tgtk-fab'))) return old;
+      }
+      const spans = card.querySelectorAll('span');
+      for (let i = spans.length - 1; i >= 0; i--) {
+        const s = spans[i];
+        if (s.closest && s.closest('#tgtk-panel,#tgtk-fab,#tgtk-locate-bar,.tgtk-favpop,.tgtk-sug')) continue;
+        const t = String(s.textContent || '').trim();
+        if (!t || t.length > 24) continue;
+        if (/^\d/.test(t) || /^lv\s*\d/i.test(t) || /^[+\-]/.test(t)) continue;
+        return s;
+      }
+    } catch (e) {}
+    return null;
+  }
+  /** 给目标卡片加醒目描边 + 滚到视野里（只滚一次，别每轮 tick 抢滚动） */
+  function locateTick(d) {
+    const loc = pinLocateGet();
+    if (!loc) {
+      if (!locateWasActive) return;
+      locateWasActive = false;
+      locateBar(false);
+      try {
+        d.querySelectorAll('.tgtk-locate-name').forEach((x) => x.classList.remove('tgtk-locate-name'));
+        d.querySelectorAll('.tgtk-locate-hit').forEach((x) => x.classList.remove('tgtk-locate-hit', 'tgtk-locate-done'));
+      } catch (e) {}
+      return;
+    }
+    locateWasActive = true;
+    ensureLocateStyle(d);
+    const list = loc.cids || [];
+    let card = null;
+    for (const cid of list) {
+      let one = null;
+      try { one = locateCardOf(d, cid); } catch (e) {}
+      if (!one) continue;
+      if (!card) card = one;
+      const nmEl = locateNameOf(one);
+      if (nmEl && !nmEl.classList.contains('tgtk-locate-name')) {
+        nmEl.classList.add('tgtk-locate-name');
+        try { nmEl.__tgtkLocateName = 1; } catch (e) {}
+      }
+    }
+    const hasList = locateHasAny();
+    // 提示条只在真的有圣殿列表时出现（以前每个页面都挂一个，小圣杯页甚至挂 3 个）
+    locateBar(hasList || !!card);
+    if (!card) return;
+    // 滚到视野里：多座定位时以「最近点的那座」为准，键用整串 cids，加减一座才重新滚
+    const key = list.join(',');
+    if (locateScrolledFor !== key) {
+      locateScrolledFor = key;
+      try {
+        card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      } catch (e) {}
+    }
+  }
+
+  /** 站点重绘把置顶按钮 / 星之力胶囊冲掉时，别等 1.2 秒后的 tick：立刻补一次。
+   *  节流从 400ms 收到 80ms —— 新版点开 / 关闭塔图会把圣殿卡整块重建，
+   *  星之力会被冲回「收益率」，等 0.4 秒已经能看出闪了。单次只有 3.5ms，跑得起。 */
+  function pinDecorKick() {
+    const now = Date.now();
+    if (now - pinDecorKickAt < 80) return;
+    pinDecorKickAt = now;
+    try { pinDecorTick(true); } catch (e) {}
+  }
+  function pinDecorTick(force) {
+    const now = Date.now();
+    // 站点每次重绘都会把按钮 / 胶囊冲掉，补得要快 —— 否则用户会看出「卡片先出来、按钮晚半拍」。
+    // 曾经压到 2 秒（那时单次 17.9ms，每轮跑撑不住）→ 最坏要等 2.4 秒；
+    // v2.3.65 把单次降到 3.5ms 之后，这里恢复到每轮跑（800ms < tick 间隔 1200ms）。
+    if (!force && now - pinDecorAt < 800) return;
+    pinDecorAt = now;
+    // 点了定位但个人圣殿页还没开：用户点开自己的头像之后自动接着找
+    try { locatePendingTry(); } catch (e) {}
+    for (const d of allDocs()) {
+      holdWire(d);
+      // 圣殿定位：没有定位时只是一次 localStorage 读，成本可以忽略
+      try { locateTick(d); } catch (e) {}
       const charaPage = S.gxStarPill ? starPageIsChara(d) : false;
+      let ccid = '';
+      try {
+        if (charaPage) ccid = currentCharacterId();
+      } catch (e) {}
       // 角色页：同一个角色下挂着很多塔主，星之力只能按塔主对号 ——
       // 个人页那套「按用户名拉他的全部塔」在这里会挂到错误的人身上，单独走一份数据。
       try {
         if (charaPage) {
-          const ccid = currentCharacterId();
+          // 浮窗 / 老页面里 currentCharacterId() 可能取不到，就从卡片自己的 data-id 反推
+          if (!ccid) {
+            try {
+              const scope0 = starCharaScope(d);
+              const anyCard = scope0.querySelector('.item[data-id]');
+              const c0 = anyCard && starCardCid(anyCard);
+              if (c0) ccid = c0;
+            } catch (e) {}
+          }
           if (
             ccid &&
             (starCharaCid !== ccid || Date.now() - starCharaAt > 300000) &&
@@ -18117,6 +20256,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           ) {
             starCharaLoad(ccid);
           }
+          // 浮窗打开时只看浮窗里面，别把背后乐园列表里的卡也刷成这个角色的星之力
+          const scope = starCharaScope(d);
           const cards = [];
           // 角色页的圣殿列表也是老式卡（.item[data-id=uid#cid] > .card > .buff），
           // 只是外层容器不一定叫 .grail_list —— 干脆按卡本身认，再用下面的 cid 过一遍
@@ -18126,7 +20267,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             '.grail_list > .item',
           ].forEach((sel) => {
             try {
-              d.querySelectorAll(sel).forEach((c) => {
+              scope.querySelectorAll(sel).forEach((c) => {
                 if (cards.indexOf(c) < 0) cards.push(c);
               });
             } catch (e) {}
@@ -18138,6 +20279,24 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
             const star = starOfCharaCard(card);
             if (star !== null) starPillPaint(card, star);
           });
+          // 新版角色页的圣殿卡（React，没有 .buff）：换它自己的收益率胶囊
+          if (S.gxStarPill) {
+            scope.querySelectorAll('[data-user-name]').forEach((card) => {
+              const cid = pinCardCid(card) || ccid;
+              if (ccid && cid && String(cid) !== String(ccid)) return;
+              const star = starOfCharaCard(card);
+              if (star !== null) starCardPaint(card, star);
+            });
+            // 卡片上没有 data-user-name 时退回圣殿网格本身（浮窗里就是这套 div.grid > .min-w-0）
+            scope.querySelectorAll('div.grid.w-full.gap-4').forEach((g) => {
+              const first = g.firstElementChild;
+              if (!first || !first.classList || !first.classList.contains('min-w-0')) return;
+              for (const card of g.children) {
+                const star = starOfCharaCard(card);
+                if (star !== null) starCardPaint(card, star);
+              }
+            });
+          }
         }
       } catch (e) {}
       // 旧版个人页：圣殿 tab 的列表（站点用 ul.grail_list，早先的模板叫 temple_list，两种都认）
@@ -18182,6 +20341,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
                 pinCidByCover(pinCoverKey(pinCardCover(card))) ||
                 (okByCount ? pinCidByIndex(g, card) : '');
               if (cid) pinPillFor(card, cid);
+              // 新版卡没有「收益率」胶囊：自己挂一枚星之力角标
+              if (cid && S.gxStarPill) {
+                const star = starForCard(card, cid, charaPage);
+                if (star !== null) starCardPaint(card, star);
+              }
             }
           }
         }
@@ -18625,12 +20789,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
   /** 兜底：整个文档里找「已注资 ₵X」这种整段文字，把金额那段包成可悬停的 span。
    *  只在能找到「发行价」的 ICO 容器里做，免得把用户资产页的「已注资：」也包了。 */
+  const tgInvestMiss = new WeakMap(); // doc → 这之前别再全页找「已注资」
   function tgWrapInvestAll(d) {
     if (!d || !d.body || !d.createTreeWalker) return;
+    // 这里用 TreeWalker 走全页文本节点（最多 3000 个），只为找「已注资 ₵X」；
+    // 页面上根本没有这类文字时（绝大多数页面），每 1.2 秒白走一遍。
+    const __ivn = Date.now();
+    if ((tgInvestMiss.get(d) || 0) > __ivn) return;
     let walker = null;
     try { walker = d.createTreeWalker(d.body, 4, null); } catch (e) { return; }
     let n = null;
     let guard = 0;
+    let __hit = 0;
     while ((n = walker.nextNode()) && guard++ < 3000) {
       if (!/已注资/.test(n.nodeValue || '')) continue;
       const p = n.parentElement;
@@ -18642,7 +20812,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       if (span) tgShareEnter(span, price, String(span.textContent || '').trim());
       // 上面 enter 会立刻换成「+N股」，包完先还原成金额，等鼠标移上去再换
       if (span) tgShareLeave(span);
+      __hit++;
     }
+    if (!__hit) tgInvestMiss.set(d, __ivn + 10000);
   }
 
   /** 每轮心跳复核所有标记过的节点：股数跟随发行价变化、站点重绘后重新认金额、
@@ -18828,6 +21000,34 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     }
     const tick = () => {
       try {
+        // 这一整条增强链只对小圣杯页面有意义，但组件在任意 bgm 页面都会跑：
+        // 条目页 / 讨论区 / 日志里每 1.2 秒白跑二十多个函数和十几次 querySelector，
+        // 长期挂着是实打实的 CPU。这里先判「本页有没有小圣杯的东西」——
+        //   · 开头 3 轮无条件放行：钩子要早装，不能等站点渲染完
+        //   · 一旦命中就永久放行（bgm 是 SPA，切页不刷新，路由事件不一定会通知到）
+        //   · 没命中过的每 2 秒复检一次，单次 querySelector 比整条链便宜一个量级
+        if (!GX.pageEver) {
+          if (GX.pageWarm > 0) {
+            GX.pageWarm--;
+          } else {
+            const now = Date.now();
+            if (now - GX.pageAt >= 2000) {
+              GX.pageAt = now;
+              for (const d of allDocs()) {
+                try {
+                  if (d.querySelector(
+                    '#grailBox, [id^="grailBox"], .grail_list, .item[data-id], ' +
+                    '[data-character-id], [id^="tg-"], a[href*="tinygrail.com"]'
+                  )) {
+                    GX.pageEver = true;
+                    break;
+                  }
+                } catch (e) {}
+              }
+            }
+            if (!GX.pageEver) return;
+          }
+        }
         gxStartWatch();
         gxDedupeBoxes(); // 每轮兜底：重复框也可能是懒加载之后才出现的
         gxMountSize(); // 角色页内嵌的圣殿尺寸开关，每轮确认还在
@@ -19352,6 +21552,16 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 #tgtk-panel select{max-width:150px}
 .tgtk-tabs{display:flex;gap:6px}
 .tgtk-ctx[hidden]{display:none}
+/* 角色列表下面的「只筛自己圣殿」：贴着输入框，别跳出去 */
+.tgtk-ctxchk{margin-top:5px}
+/* 筛塔行里的「定位」：自己的塔才有，小图钉贴在角色名右边 */
+.tgtk-locbtn{flex:none;width:16px;height:16px;padding:0;border:0;border-radius:4px;background:transparent;
+  color:var(--tg-mute);display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.tgtk-locbtn svg{display:block}
+.tgtk-locbtn:hover,.tgtk-locbtn:focus{color:var(--tg-accent);background:var(--tg-hit);outline:none}
+/* 已定位的那几座：图钉变粉，再点一下取消 */
+.tgtk-locbtn.on{color:#e46fa1;background:rgba(228,111,161,.12)}
+.tgtk-locbtn.on:hover,.tgtk-locbtn.on:focus{background:rgba(228,111,161,.22)}
 .tgtk-actions{justify-content:flex-start}
 .tgtk-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--tg-line);background:var(--tg-surface2);color:var(--tg-fg2);font:inherit;
   font-size:12px;cursor:pointer}
@@ -19391,8 +21601,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   background:var(--tg-surface)}
 .tgtk-row.tgtk-hit{background:var(--tg-hit)}
 .tgtk-main{display:flex;flex-direction:column;min-width:0}
-.tgtk-name{color:var(--tg-link);text-decoration:none;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tgtk-name{color:var(--tg-link);text-decoration:none;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  /* 只让文字本身可点：不加这句，flex 列里的 <a> 会横向撑满，点行首空白也会跳角色页 */
+  align-self:flex-start;max-width:100%}
 .tgtk-name:hover{text-decoration:underline}
+.tgtk-namerow{display:flex;align-items:center;gap:4px;min-width:0;max-width:100%}
 .tgtk-sub{color:var(--tg-dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tgtk-val{font-variant-numeric:tabular-nums;color:var(--tg-fg2);white-space:nowrap;font-size:12px}
 .tgtk-val b{color:var(--tg-hl);font-weight:600}
@@ -19881,7 +22094,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.53（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.90（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -19920,7 +22133,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const guardFn = () => { const f = HWIN.__TGTK_AUTOFILL_FN__; if (typeof f === 'function') f(); };
     if (!HWIN.__TGTK_AUTOFILL_GUARD__) {
       HWIN.__TGTK_AUTOFILL_GUARD__ = true;
-      setInterval(guardFn, 600);
+      // 0.6 秒一次太密（这是全场频率最高的定时器，而它只在收藏「手动添加」弹窗里
+      // 才有活干）；1.5 秒配合下面 sweep 的多点重扫，打开弹窗时的即时性不受影响
+      setInterval(guardFn, 1500);
       const sweep = () => [0, 120, 500, 1500, 3000].forEach((ms) => setTimeout(guardFn, ms));
       sweep();
       try { HWIN.addEventListener('load', sweep); } catch (e) {}
@@ -19972,7 +22187,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.53', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.90', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
         // 旧版圣殿卡的星之力胶囊：离线测「找 .buff → 换数字 / 换色 / 还原」
@@ -19982,6 +22197,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         starOfCharaCard,
         starCardCid,
         starPageIsChara: (d) => starPageIsChara(d || document),
+        starCharaScope: (d) => starCharaScope(d || document),
         starNumNode: (card, box) => starNumNode(card, box || pinCoverBox(card) || card),
         starCharaSeed: (rows) => {
           for (const k in starCharaByUid) delete starCharaByUid[k];
@@ -19995,6 +22211,29 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           starCharaAt = Date.now();
           starCharaFailAt = 0;
         },
+        // 新版卡片的星之力角标 / 角色页「???」悬停持股
+        starBadgeRemove, starForCard, starCardPaint,
+        holdBadgeOf, holdRankOf, holdNameOf, holdShow, holdRestore, holdCardOf,
+        holdClickTarget, holdNameDirect,
+        holdSeed: () => {
+          for (const k in holdListCache) delete holdListCache[k];
+          for (const k in holdNumCache) delete holdNumCache[k];
+        },
+        // tick 的「本页有没有小圣杯」判定：离线测「普通 bgm 页面不空转 / 命中后永久放行」
+        gxPageState: () => ({ ever: !!GX.pageEver, warm: GX.pageWarm, at: GX.pageAt }),
+        gxPageReset: () => {
+          GX.pageEver = false;
+          GX.pageWarm = 0;
+          GX.pageAt = 0;
+        },
+        // 圣殿定位：离线测「临时排第一 / 不改名单 / 清掉后恢复」
+        pinLocateGet, pinLocateSet, pinLocateClear, pinLocateHas, pinOrdered, pinOn, locateTick, locateCardOf,
+        locateRefreshBtns, templeLiveRefresh, templeLiveOld, locateCurrentPage, pinToggle, botToggle, gcApplyOld,
+        locateFindCard, locateHosts, locateReopenPop, locateRun,
+        locateGrids, locateGridAny, locateCardAny, locateHasAny,
+        pinPageCids: (pg) => (pinPages[pg] && pinPages[pg].items ? pinPages[pg].items.map((x) => String(x.CharacterId)) : null),
+        pinAllReset: () => { pinAll.at = 0; pinAll.items = null; pinAll.busy = null; pinAll.failAt = 0; pinAll.user = ''; },
+        pinLists: () => ({ pins: pinList(), bots: botList(), on: !!TUI.on }),
       };
     }
   } catch (e) {}
