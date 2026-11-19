@@ -1,5 +1,5 @@
 /**
- * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.90
+ * 小圣杯工具箱 · Bangumi 超合金组件 v2.3.96
  * 说明与更新记录：https://github.com/kana-kwi/tinygrail-toolkit
  */
 (function () {
@@ -318,6 +318,7 @@
   let favRows = [];
   let logAll = [];
   let logWindow = null;
+  let logCache = null;
   let magicRunning = false;
   let starRunning = false;
   const starCapCache = Object.create(null); // 角色 → 塔的固资上限（读过一次就记住，用于消耗估算）
@@ -2719,6 +2720,111 @@
     return best || 24;
   }
 
+  function locateOldRoot() {
+    for (const d of allDocs()) {
+      let box = null;
+      try { box = d.querySelector('#grail .temple_list'); } catch (e) {}
+      if (!box) continue;
+      let tab = null;
+      try { tab = d.querySelector('#templeTab'); } catch (e) {}
+      if (!tab) continue;          // 没有这套 tab 就不是旧版个人页
+      return { doc: d, box: box, tab: tab };
+    }
+    return null;
+  }
+
+  function locateOldKick(page) {
+    const o = locateOldRoot();
+    if (!o) return false;
+    const d = o.doc;
+    const want = String(page || 1);
+    let btn = null;
+    try { btn = d.querySelector('#pager1 .p[data-page="' + want + '"]'); } catch (e) {}
+    let w = null;
+    let name = '';
+    try {
+      w = d.defaultView || window;
+      const g = d.querySelector('#grail');
+      name = g ? String(g.getAttribute('data-name') || '') : '';
+    } catch (e) {}
+    const canFn = !!(name && w && typeof w.loadUserTemples === 'function');
+    if (!btn && !canFn) return false;
+    try {
+      const cached = o.box.querySelectorAll('.grail_list');
+      for (let i = 0; i < cached.length; i++) cached[i].remove();
+    } catch (e) {}
+    try {
+      if (btn) { btn.click(); return true; }
+      w.loadUserTemples(Number(want) || 1, name);
+      return true;
+    } catch (e) {}
+    return false;
+  }
+
+  async function locateRunOld(id, nm) {
+    const o = locateOldRoot();
+    if (!o) return false;
+    try { if (o.box.style.display === 'none') o.tab.click(); } catch (e) {}
+    if (!pinAllGet()) {
+      setTempleStatus('正在读你的圣殿列表…');
+      try { await pinAllLoad(); } catch (e) {}
+    }
+    try { pinLocateSet(id); } catch (e) {}
+    locateRefreshBtns();
+    const t0 = Date.now();
+    setTempleStatus('正在把它排到第 1 页…');
+    locateWatchOnce(o.box, 6000);      // 换页那一刻就把粉色补回去，别等 tick
+    if (!locateOldKick(1)) {
+      const c0 = locateCardAny(id);
+      if (c0) {
+        try {
+          const el0 = locateNameOf(c0);
+          if (el0) el0.classList.add('tgtk-locate-name');
+          c0.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (e) {}
+        setTempleStatus('已标记 ' + nm + '：切一次分页就排到最前');
+        try { pinToast('已标记：切一次分页就排到最前'); } catch (e) {}
+        return true;
+      }
+      setTempleStatus('分页器还没渲染好：稍等一下再点定位，或手动切一次分页');
+      return false;
+    }
+    let rec = null;
+    for (let i = 0; i < 14; i++) {
+      await sleep(300);
+      const one = pinPages[1];
+      if (one && one.at >= t0 && one.items && one.items.length) { rec = one; break; }
+    }
+    let idx = -1;
+    if (rec && rec.items) {
+      for (let i = 0; i < rec.items.length; i++) {
+        const it = rec.items[i];
+        if (it && String(it.CharacterId) === id) { idx = i; break; }
+      }
+    }
+    let card = null;
+    for (let r = 0; r < 16; r++) {
+      locateMarkAll(o.doc);            // 上一批定位的那几座也一起补，别让它们先黑一下
+      card = locateCardAny(id);
+      if (card) break;
+      await sleep(r < 8 ? 120 : 250);
+    }
+    if (!card) {
+      setTempleStatus('没排上：这一轮没拿回你的列表（站点可能用了缓存），刷新一次页面再点定位');
+      try { pinToast('没排上：刷新一次页面再点定位'); } catch (e) {}
+      return false;
+    }
+    try {
+      const el = locateNameOf(card);
+      if (el && !el.classList.contains('tgtk-locate-name')) el.classList.add('tgtk-locate-name');
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+    const pos = idx >= 0 ? `第 ${idx + 1} 个` : '已高亮';
+    setTempleStatus(`已定位：${nm} 排在第 1 页${pos}（角色名已标粉）`);
+    try { pinToast('已定位：' + nm + ' 排在第 1 页' + pos); } catch (e) {}
+    return true;
+  }
+
   function locatePagerOf(grid) {
     try {
       let box = grid && grid.parentElement;
@@ -2910,6 +3016,7 @@
   }
 
   async function locateRun(id, nm) {
+    if (locateOldRoot()) return await locateRunOld(id, nm);
     if (!locateGridAny()) {
       setTempleStatus('正在切到「N座圣殿」…');
       await locateEnsureTempleTab();
@@ -2965,7 +3072,8 @@
       }
     }
     let card = null;
-    for (let round = 0; round < 12; round++) {
+    for (let round = 0; round < 16; round++) {
+      locateMarkAllDocs();             // 一次重拉会把别的定位卡的粉色冲掉：每轮都补
       const g2 = locateGridAny();
       if (idx >= 0 && g2 && g2.children && g2.children[idx]) {
         const c2 = g2.children[idx];
@@ -2978,7 +3086,7 @@
       }
       card = locateCardAny(id);
       if (card) break;
-      await sleep(250);
+      await sleep(round < 8 ? 120 : 250);
     }
     if (!card) {
       setTempleStatus(`没排上：这一轮没拿回你的列表（站点可能用了缓存），刷新一次页面再点定位`);
@@ -3162,6 +3270,7 @@
     const alive = (opt && opt.alive) || (() => true);
     const onProgress = (opt && opt.onProgress) || (() => {});
     const K = encodeURIComponent(key);
+    const failedPages = [];
     const first = await api(`chara/user/chara/${K}/1/${PAGE_SIZE}`);
     const got = ((first && first.Items) || []).slice();
     const total = num(first && first.TotalItems) || got.length;
@@ -3179,7 +3288,7 @@
             onProgress(got.length, total);
             return;
           } catch (e) {
-            if (attempt) return;
+            if (attempt) { failedPages.push(p); return; }
             await sleep(250);
           }
         }
@@ -3194,7 +3303,8 @@
       seen.add(id);
       items.push(it);
     }
-    return { items, total };
+    const complete = failedPages.length === 0 && items.length >= total;
+    return { items, total, complete, failedPages };
   }
 
   async function scanHoldings() {
@@ -3236,11 +3346,19 @@
         if (r.items.length) key = me;
       }
       holdAll = r.items;
-      holdAt = nowMs();
+      holdAt = r.complete === false ? 0 : nowMs();
       sugCache.clear();
       sugIdCache.clear();
       renderHoldings();
 
+      if (r.complete === false) {
+        setHoldStatus(
+          `持仓扫描不完整：已读 ${holdAll.length} / ${r.total || '?'}` +
+            (r.failedPages && r.failedPages.length ? `，失败页 ${r.failedPages.join('、')}` : '') +
+            ' · 建议重新扫描'
+        );
+        return;
+      }
       if (holdAll.length && holdAll.every((x) => num(x.UserAmount) === 0)) {
         setHoldStatus(`持仓 ${holdAll.length} 只，但数量全是 0：可能未登录小圣杯，或浏览器拦截了第三方 cookie`);
       }
@@ -4342,8 +4460,9 @@
       return await api(path, { method: 'POST', body: '{}' });
     } catch (err) {
       const msg = String((err && err.message) || err);
-      if ((attempt || 0) < 1 && !isQuotaMagicError(msg) && !/不足/.test(msg)) {
-        await sleep(2000);
+      const rateLimited = /HTTP\s*429|Too Many Requests|请求过于频繁|操作太频繁/i.test(msg);
+      if (rateLimited && (attempt || 0) < 2) {
+        await sleep(2000 + 1500 * (attempt || 0));
         return postMagic(path, (attempt || 0) + 1);
       }
       throw err;
@@ -4405,6 +4524,7 @@
       let value = 0;
       let stopped = false;
       let retryLeft = 3; // 整批最多「补充后重试」3 次，防止任何异常状态下打转
+      const hits = [];
 
       for (let i = 1; i <= times; i++) {
         if (!magicRunning) {
@@ -4427,12 +4547,17 @@
           if (assetsLeft !== null) assetsLeft = Math.max(0, assetsLeft - def.cost);
           const amount = num(v && (v.Amount ?? v.amount));
           const price = num(v && (v.CurrentPrice ?? v.Current));
-          const name = (v && v.Name) || toName;
+          const gotId = num(v && (v.Id ?? v.CharacterId ?? v.CharaId)) || 0;
+          const name = (v && v.Name) || (gotId ? nameCache[gotId] || '' : '') || toName;
           const detail = typeof v === 'string' ? v : v && typeof v.Message === 'string' ? v.Message : '';
           ok++;
           gain += amount;
           value += amount * price;
-          if (v && v.Name) nameCache[to] = v.Name;
+          if (v && v.Name) {
+            if (gotId) nameCache[gotId] = v.Name;
+            else if (def.needTarget) nameCache[to] = v.Name;
+          }
+          if (amount > 0) hits.push({ i, name, amount, price });
           pushMagicLog(
             h(
               'div',
@@ -4510,7 +4635,7 @@
         const left = after[def.name];
         if (left !== undefined) pushMagicLog(h('div', { class: 'tgtk-log tgtk-log-info' }, `剩余「${def.name}」${fmt(left)} 个`));
       }
-      return { ok, fail, gain, value, stopped, text: summary };
+      return { ok, fail, gain, value, stopped, text: summary, hits };
     } finally {
       magicRunning = false;
       busy = false;
@@ -4818,14 +4943,21 @@
       sugIdCache.clear();
       if (sdHold.length) {
         holdAll = sdHold.slice();
-        holdAt = nowMs();
+        holdAt = r.complete === false ? 0 : nowMs();
       }
 
       if (!sdHold.length) {
         setSdStatus('没有读到持股，检查是否登录小圣杯');
         return;
       }
-      const complete = r.total > 0 && sdHold.length >= r.total;
+      const complete = r.complete === true || (r.complete === undefined && r.total > 0 && sdHold.length >= r.total);
+      if (r.complete === false) {
+        setSdStatus(
+          `持股没读全（已读 ${sdHold.length} / ${r.total || '?'}` +
+            (r.failedPages && r.failedPages.length ? `，失败页 ${r.failedPages.join('、')}` : '') +
+            '），燃料队列先不动，可以点「读取持股」重试'
+        );
+      }
       let pruned = 0;
       if (complete) {
         const have = new Set(sdHold.map((x) => String(x.CharacterId)));
@@ -5062,7 +5194,7 @@
 
   async function refreshSdTarget() {
     const to = parseCharId(S.sdTarget);
-    if (!to) return;
+    if (!to) { sdTargetInfo = null; return false; }
     try {
       await loadNames([to]);
       const lv = await fetchTargetLevel(to);
@@ -5071,7 +5203,7 @@
         sdTargetInfo = null;
         setSdStatus(`#${to}「${charaName(to)}」不是你的圣殿（或未登录），无法作为目标`);
         renderSdPick();
-        return;
+        return false;
       }
       sdTargetInfo = {
         cid: String(to), lv: lv || 0,
@@ -5079,7 +5211,10 @@
         assets: num(t.Assets), cap: num(t.Sacrifices),
       };
       renderSdPick();
+      return true;
     } catch (e) {
+      if (sdTargetInfo && String(sdTargetInfo.cid) !== String(to)) sdTargetInfo = null;
+      return false;
     }
   }
 
@@ -5192,14 +5327,20 @@
     let failed = '';
     let capStop = false; // 因为已经冲过上限而提前停（不是燃料不够）
     const touched = [];
-    const lvB = sdTargetInfo && sdTargetInfo.lv ? Math.floor(sdTargetInfo.lv) : 0;
-    const capNow = sdTargetInfo ? num(sdTargetInfo.cap) : 0;
-    let assetsNow = sdTargetInfo ? num(sdTargetInfo.assets) : 0;
+    let lvB = 0;
+    let capNow = 0;
+    let assetsNow = 0;
 
     try {
       await loadNames(queue.concat([to]));
-      if (!sdTargetInfo || String(sdTargetInfo.cid) !== String(to)) await refreshSdTarget();
-      const toName = charaName(to);
+      const targetOk = await refreshSdTarget();
+      const usingTarget = targetOk && sdTargetInfo && String(sdTargetInfo.cid) === String(to);
+      const snap = usingTarget ? sdTargetInfo : null;
+      lvB = snap && snap.lv ? Math.floor(snap.lv) : 0;
+      capNow = snap ? num(snap.cap) : 0;
+      assetsNow = snap ? num(snap.assets) : 0;
+      const toName = (snap && snap.name) || charaName(to);
+      if (!usingTarget) log('warn', `没读到「${toName}」的塔信息：本轮不做上限预估，充到站点拒绝就停`);
       log('info', `本次共消耗 ${fmt(amt)} 股 → 补充「${toName}」的固定资产 · 燃料队列 ${queue.length} 只，按顺序扣`);
 
       for (let i = 0; i < queue.length && left > 0; i++) {
@@ -5607,6 +5748,23 @@
     }
   }
 
+  async function icoWithLock(id, task) {
+    const locks = (() => {
+      try { return navigator.locks; } catch (e) { return null; }
+    })();
+    if (!locks || typeof locks.request !== 'function') {
+      return await task();
+    }
+    try {
+      return await locks.request('tgtk:ico:' + id, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        if (!lock) return { busy: true };
+        return await task();
+      });
+    } catch (e) {
+      return await task();
+    }
+  }
+
   async function icoAutoCheck() {
     if (icoAutoRunning) return;
     const plans = icoPlans();
@@ -5693,16 +5851,22 @@
           pushIcoLog('warn', `「${p.name}」补到 Lv${p.lv} 需要 ₵${fmt(need)}，可用余额只剩 ₵${fmt(leftBal)}`);
           continue;
         }
-        const cur2 = icoCfgOf(p.id) || {};
-        S.icoCfg[p.id] = Object.assign({}, cur2, { claimAt: Date.now() });
-        persist();
-        try {
-          await api(`chara/join/${v.icoId || p.id}/${need}`, { method: 'POST', body: '{}' });
-          leftBal -= need;
-          icoFinish(p.id, 'ok', `「${p.name}」自动注资 ₵${fmt(need)} → 目标 Lv${p.lv}`);
-        } catch (e) {
-          icoFinish(p.id, 'fail', `「${p.name}」注资失败：${e && e.message ? e.message : e}`);
-        }
+        const locked = await icoWithLock(p.id, async () => {
+          const cur2 = icoCfgOf(p.id) || {};
+          if (!cur2.on || icoDone.has(p.id)) return { skip: true };
+          S.icoCfg[p.id] = Object.assign({}, cur2, { claimAt: Date.now() });
+          persist();
+          try {
+            await api(`chara/join/${v.icoId || p.id}/${need}`, { method: 'POST', body: '{}' });
+            icoFinish(p.id, 'ok', `「${p.name}」自动注资 ₵${fmt(need)} → 目标 Lv${p.lv}`);
+            return { paid: true };
+          } catch (e) {
+            icoFinish(p.id, 'fail', `「${p.name}」注资失败：${e && e.message ? e.message : e}`);
+            return { failed: e };
+          }
+        });
+        if (locked && locked.paid) leftBal -= need;
+        else if (locked && locked.busy) icoCool.set(p.id, Date.now() + 6000);
       }
       if (S.tab === 'ico') await loadIco(true);
     } catch (e) {
@@ -5713,7 +5877,9 @@
   }
 
   const LOG_PAGE = 200;
-  const LOG_MAX_PAGE = 40;
+  const LOG_BLOCK = 5;
+  const LOG_HEAD_PAGE = 10;
+  const LOG_MAX_PAGE = 150;
   const TAX_RE = /个人所得税|所得税|股息税/;
 
   function logTs(v) {
@@ -6271,11 +6437,17 @@
     return { rows: rows.slice(0, top), count: rows.length, dir, kind, val };
   }
 
+  function logKey(x) {
+    if (!x) return '';
+    const id = x.Id ?? x.LogId;
+    if (id !== undefined && id !== null && id !== '') return 'i' + id;
+    return [x.LogTime, x.Type, x.Change, x.Amount, x.RelatedId, x.Description].join('\u0001');
+  }
+
   async function scanLogs() {
     if (busy) return;
     busy = true;
     setButtonsDisabled(true);
-    logAll = [];
     els.logList.textContent = '';
 
     try {
@@ -6283,33 +6455,109 @@
       const winFrom = range.from;
       const winTo = range.to;
       logWindow = range;
-      const cutoff = winFrom;
-      let page = 1;
-      let pages = 1;
-      let reached = false;
 
-      do {
-        if (!busy) break;
-        const v = await api(`chara/user/balance/${page}/${LOG_PAGE}`);
-        const items = v.Items || [];
-        pages = num(v.TotalPages) || 1;
+      const cache = logCache;
+      const canReuse = !!(
+        cache &&
+        cache.items &&
+        cache.items.length &&
+        (cache.truncated || (cache.coveredFrom && cache.coveredFrom <= winFrom))
+      );
+      let list = canReuse ? cache.items.slice() : [];
+      const seen = new Set(list.map(logKey));
+      let pages = canReuse ? num(cache.pages) || 0 : 0;
+      let reached = canReuse; // 复用 = 这段范围本来就已读全
+      let truncated = canReuse ? !!cache.truncated : false;
+      let coveredFrom = canReuse ? num(cache.coveredFrom) || winFrom : winFrom;
+      let headN = 0;
 
-        for (let i = 0; i < items.length; i++) {
-          const ts = logTs(items[i].LogTime);
-          if (ts && ts < cutoff) {
-            reached = true;
-            break;
+      if (canReuse) {
+        const anchor = logKey(list[0]);
+        const fresh = [];
+        let hit = false;
+        for (let p = 1; p <= LOG_HEAD_PAGE; p++) {
+          if (!busy) break;
+          const v = await api(`chara/user/balance/${p}/${LOG_PAGE}`);
+          pages = num(v.TotalPages) || pages;
+          const items = v.Items || [];
+          if (!items.length) break;
+          for (let i = 0; i < items.length; i++) {
+            const k = logKey(items[i]);
+            if (k === anchor) { hit = true; break; }
+            if (seen.has(k)) continue;
+            seen.add(k);
+            fresh.push(items[i]);
           }
-          if (ts && winTo && ts >= winTo) continue;
-          logAll.push(items[i]);
+          if (hit) break;
+          if (p < LOG_HEAD_PAGE) await sleep(80);
         }
+        if (hit) {
+          headN = fresh.length;
+          if (headN) list = fresh.concat(list); // fresh 是「新 → 旧」，直接接在前面
+        } else {
+          list = [];
+          seen.clear();
+          reached = false;
+          truncated = false;
+        }
+      }
 
-        setLogStatus(`读取 ${logAll.length} 条…（第 ${page} / ${pages} 页）`);
-        if (reached) break;
+      if (!reached) {
+        const take = (items) => {
+          for (let i = 0; i < items.length; i++) {
+            const ts = logTs(items[i].LogTime);
+            if (ts && ts < winFrom) return true;
+            const k = logKey(items[i]);
+            if (seen.has(k)) continue;
+            seen.add(k);
+            list.push(items[i]);
+          }
+          return false;
+        };
 
-        page++;
-        if (page <= pages && page <= LOG_MAX_PAGE) await sleep(140);
-      } while (page <= pages && page <= LOG_MAX_PAGE);
+        const v1 = await api(`chara/user/balance/1/${LOG_PAGE}`);
+        pages = num(v1.TotalPages) || 1;
+        reached = take(v1.Items || []);
+        const lastPage = Math.min(pages, LOG_MAX_PAGE);
+
+        let nextPage = 2;
+        while (!reached && nextPage <= lastPage) {
+          if (!busy) break;
+          const block = [];
+          for (let p = nextPage; p < nextPage + LOG_BLOCK && p <= lastPage; p++) block.push(p);
+          const got = new Array(block.length);
+          await mapLimit(block, LOG_BLOCK, async (p, idx) => {
+            try {
+              got[idx] = await api(`chara/user/balance/${p}/${LOG_PAGE}`);
+            } catch (e) {
+              got[idx] = null;
+            }
+          });
+          for (let bi = 0; bi < got.length && !reached; bi++) {
+            if (got[bi]) reached = take(got[bi].Items || []);
+          }
+          nextPage += block.length;
+          setLogStatus(`读取 ${list.length} 条…（第 ${Math.min(nextPage - 1, lastPage)} / ${lastPage} 页）`);
+          if (nextPage <= lastPage) await sleep(100);
+        }
+        if (!reached && nextPage > pages) reached = true;
+        truncated = !reached && nextPage > LOG_MAX_PAGE && LOG_MAX_PAGE < pages;
+      }
+
+      const lowestTs = list.length ? logTs(list[list.length - 1].LogTime) : 0;
+      logCache = {
+        items: list,
+        coveredFrom: reached ? coveredFrom : lowestTs || winFrom,
+        truncated,
+        pages,
+        at: nowMs(),
+      };
+      logAll = list.filter((x) => {
+        const ts = logTs(x.LogTime);
+        if (ts && ts < winFrom) return false;
+        if (ts && winTo && ts >= winTo) return false;
+        return true;
+      });
 
       const nameIds = [];
       logAll.forEach((x) => {
@@ -6324,9 +6572,16 @@
       }
       renderLedger();
 
+      const rich = els ? els.logStat.textContent : '';
       if (!logAll.length) setLogStatus('这段时间没有资金日志');
       else if (!logStats().chars.length) {
         setLogStatus(`${logAll.length} 条日志，但接口没给出股数变化（Amount），无法统计角色`);
+      } else if (truncated) {
+        setLogStatus(`${rich} · 只读到第 ${Math.min(pages, LOG_MAX_PAGE)} / ${pages} 页（更早的还没读，缩小范围更准）`);
+      } else if (headN) {
+        setLogStatus(`${rich} · 新增 ${headN} 条，其余沿用上次统计`);
+      } else if (canReuse) {
+        setLogStatus(`${rich} · 沿用上次统计（没有新记录）`);
       }
     } catch (err) {
       if (err && err.needLogin) setLogStatus(err.message, 'login');
@@ -7926,7 +8181,8 @@
         { class: 'tgtk-note' },
         '按资金日志统计，来源按接口 Type 字段归类；只能统计自己的账号（需要登录小圣杯，' +
           '浏览器禁止第三方 Cookie 时也会读不到）。' +
-          '竞拍 / 买入记净额（扣掉返还、撤单），股息记税后，卖出只算成交的；固资数值按日志描述解析'
+          `单次最多读取 ${LOG_MAX_PAGE} 页日志（约 ${fmt((LOG_MAX_PAGE * LOG_PAGE) / 10000)} 万条）；` +
+          '范围太大时只读到较新的一段，状态栏会写明「只读到第 N / M 页」'
       )
     );
 
@@ -8086,6 +8342,15 @@
             if (r && r.fail) bad++;
             done++;
             dailyLogLine(r && r.fail ? 'tgtk-log-warn' : 'tgtk-log-ok', `✓ ${def.label}：${(r && r.text) || '完成'}`);
+            if (!def.needTarget && r && r.hits && r.hits.length) {
+              r.hits.slice(0, 8).forEach((x) => {
+                dailyLogLine(
+                  'tgtk-log-ok',
+                  `#${x.i} ${x.name} +${fmt(x.amount)} 股` +
+                    (x.price ? `（₵${fmt(x.price, x.price % 1 ? 2 : 0)}/股）` : '')
+                );
+              });
+            }
           }
           if (i < picks.length - 1 && !dailyStop) await sleep(1200);
         }
@@ -8097,30 +8362,41 @@
           let fail = 0;
           let gain = 0;
           let value = 0;
-          for (let i = 1; i <= 3; i++) {
-            if (dailyStop) break;
-            try {
-              const v = await api('event/scratch/bonus2', { method: 'POST', body: '{}' });
-              const items = Array.isArray(v) ? v : [];
-              const g = items.reduce((s, x) => s + num(x.Amount), 0);
-              const val = items.reduce((s, x) => s + num(x.Amount) * num(x.CurrentPrice), 0);
-              ok++;
-              gain += g;
-              value += val;
-              const top = items
-                .slice()
-                .sort((a, b) => num(b.CurrentPrice) - num(a.CurrentPrice))
-                .slice(0, 3)
-                .map((x) => (x.Name || '#' + x.Id) + ' +' + fmt(num(x.Amount)))
-                .join('、');
-              dailyLogLine('tgtk-log-ok', `#${i} ${top || '开出 1 张'}${items.length > 3 ? ' 等' : ''}`);
-            } catch (e) {
-              fail++;
-              dailyLogLine('tgtk-log-fail', `#${i} 失败：${e && e.message ? e.message : e}`);
+          let aborted = '';
+          const wasMagicBusy = magicRunning;
+          magicRunning = true;
+          try {
+            for (let i = 1; i <= 3; i++) {
+              if (dailyStop) break;
+              try {
+                const v = await api('event/scratch/bonus2', { method: 'POST', body: '{}' });
+                const items = Array.isArray(v) ? v : [];
+                const g = items.reduce((s, x) => s + num(x.Amount), 0);
+                const val = items.reduce((s, x) => s + num(x.Amount) * num(x.CurrentPrice), 0);
+                ok++;
+                gain += g;
+                value += val;
+                const top = items
+                  .slice()
+                  .sort((a, b) => num(b.CurrentPrice) - num(a.CurrentPrice))
+                  .slice(0, 3)
+                  .map((x) => (x.Name || '#' + x.Id) + ' +' + fmt(num(x.Amount)))
+                  .join('、');
+                dailyLogLine('tgtk-log-ok', `#${i} ${top || '开出 1 张'}${items.length > 3 ? ' 等' : ''}`);
+              } catch (e) {
+                fail++;
+                const msg = e && e.message ? e.message : String(e);
+                dailyLogLine('tgtk-log-fail', `#${i} 请求异常，结果未确认：${msg}`);
+                dailyLogLine('tgtk-log-warn', `已停止后续刮刮乐（避免重复花费），请先核对账户记录再手动继续`);
+                aborted = msg;
+                break;
+              }
+              if (i < 3 && !dailyStop) await sleep(900);
             }
-            if (i < 3 && !dailyStop) await sleep(900);
+          } finally {
+            magicRunning = wasMagicBusy;
           }
-          const t = `刮刮乐 成功 ${ok} / 失败 ${fail}` + (gain ? ` · 共 ${fmt(gain)} 股` : '') + (value ? ` · 约 ₵${fmt(value)}` : '');
+          const t = `刮刮乐 成功 ${ok} / 失败 ${fail}` + (aborted ? '（已中断）' : '') + (gain ? ` · 共 ${fmt(gain)} 股` : '') + (value ? ` · 约 ₵${fmt(value)}` : '');
           dailyLogLine('tgtk-log-sum', t);
           if (fail) bad++;
           done++;
@@ -9011,14 +9287,14 @@
         S.logDays = num(lDays.value) || 7;
       }
       persist();
-      if (logAll.length) scanLogs();
+      scanLogs();
     });
     [lFrom, lTo].forEach((inp) =>
       inp.addEventListener('change', () => {
         S.logFrom = lFrom.value || '';
         S.logTo = lTo.value || '';
         persist();
-        if (logAll.length) scanLogs();
+        scanLogs();
       })
     );
     lDir.addEventListener('change', () => {
@@ -10620,31 +10896,46 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return pop;
   }
 
+  const gxInflight = Object.create(null);
+
   async function gxData(cid, force) {
     const c = GX.cache[cid];
     if (!force && c && Date.now() - c.at < 60000) return c;
-    if (GX.busy === cid) return c || null;
+    if (gxInflight[cid]) {
+      let waited = null;
+      try { waited = await gxInflight[cid]; } catch (e) {}
+      if (waited) return waited;
+      if (!force) return GX.cache[cid] || null;
+    }
+    const job = (async () => {
+      const out = { at: Date.now(), base: null, bid: null, temples: null };
+      try {
+        const v = await api(`chara/user/${cid}/tinygrail/false`);
+        if (v) out.base = { price: num(v.Price), amount: num(v.Amount) };
+      } catch (e) {}
+      try {
+        const v = await api('chara/auction/list', { method: 'POST', body: JSON.stringify([Number(cid)]) });
+        const arr = Array.isArray(v) ? v : (v && v.Items) || [];
+        const row = arr[0] || null;
+        out.bid = row
+          ? { users: num(row.State), filled: num(row.Type), price: num(row.Price), amount: num(row.Amount) }
+          : { users: 0, filled: 0, price: 0, amount: 0 };
+      } catch (e) {}
+      try {
+        const v = await api(`chara/temple/${cid}`);
+        out.temples = Array.isArray(v) ? v : (v && v.Items) || [];
+      } catch (e) {}
+      GX.cache[cid] = out;
+      return out;
+    })();
+    gxInflight[cid] = job;
     GX.busy = cid;
-    const out = { at: Date.now(), base: null, bid: null, temples: null };
     try {
-      const v = await api(`chara/user/${cid}/tinygrail/false`);
-      if (v) out.base = { price: num(v.Price), amount: num(v.Amount) };
-    } catch (e) {}
-    try {
-      const v = await api('chara/auction/list', { method: 'POST', body: JSON.stringify([Number(cid)]) });
-      const arr = Array.isArray(v) ? v : (v && v.Items) || [];
-      const row = arr[0] || null;
-      out.bid = row
-        ? { users: num(row.State), filled: num(row.Type), price: num(row.Price), amount: num(row.Amount) }
-        : { users: 0, filled: 0, price: 0, amount: 0 };
-    } catch (e) {}
-    try {
-      const v = await api(`chara/temple/${cid}`);
-      out.temples = Array.isArray(v) ? v : (v && v.Items) || [];
-    } catch (e) {}
-    GX.cache[cid] = out;
-    if (GX.busy === cid) GX.busy = '';
-    return out;
+      return await job;
+    } finally {
+      if (gxInflight[cid] === job) delete gxInflight[cid];
+      if (GX.busy === cid) GX.busy = '';
+    }
   }
 
   function gxTempleLv(t) {
@@ -12152,7 +12443,13 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function gxOpenBid(rec, anchor) {
     const cid = rec.cid;
     const data = GX.cache[cid] || {};
-    const base = (data.base && data.base.price) || 0;
+    const bidBase = (v) => {
+      const x = num(v);
+      if (!(x > 0)) return 0;
+      const shown = Math.round(x * 100) / 100;
+      return shown + 1e-9 >= x ? shown : Math.round(shown * 100 + 1) / 100;
+    };
+    const base = bidBase(data.base && data.base.price);
     const pop = gxPop(`股权拍卖 · ${gxCharLabel(cid)}`, anchor, { center: true, wide: true });
 
     const hint = h('div', { class: 'tgtk-histsum' }, '读取中…');
@@ -12169,6 +12466,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       value: initPrice ? String(initPrice) : '',
       title: '出价（不能低于底价）',
     });
+    let priceTouched = false;
     const amountIn = h('input', {
       type: 'number',
       min: '1',
@@ -12181,11 +12479,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       sum.textContent = '合计 -₵' + fmt(num(priceIn.value) * num(amountIn.value), 2);
     };
 
-    const fill = () => {
+    const fill = (failed) => {
       const d = GX.cache[cid] || {};
       const b = d.bid || null;
       const t = (d.base && d.base.amount) || 0;
-      const baseP = (d.base && d.base.price) || 0;
+      const baseP = bidBase(d.base && d.base.price);
+      if (!d.base && !d.bid) {
+        hint.title = '';
+        hint.textContent = failed
+          ? '读不到拍卖信息（未登录 / 网络问题），可以手动填价格和数量再试'
+          : '正在读取底价…';
+        return;
+      }
       if (baseP) priceIn.setAttribute('min', String(baseP));
       numSpan.textContent = '';
       if (b) {
@@ -12201,9 +12506,14 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       hint.textContent = t
         ? `底价 ₵${fmt(baseP, 2)} · 拍卖总量 ${fmt(t)} 股 · 待拍 ${fmt(Math.max(0, t - ((b && b.filled) || 0)))} 股`
         : `底价 ₵${fmt(baseP, 2)} · 可拍 0 股 · 萌王投票仍可直接出价`;
+      const rawP = num(d.base && d.base.price);
+      hint.title = rawP > 0 && fmt(baseP, 2) !== fmt(rawP, 2) ? `实际底价 ₵${rawP}，出价不能低于它` : '';
       if (b && b.price > 0 && b.amount > 0) {
         priceIn.value = String(b.price);
         amountIn.value = String(b.amount);
+        upd();
+      } else if (!priceTouched && baseP) {
+        priceIn.value = String(baseP);
         upd();
       }
     };
@@ -12225,7 +12535,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       e.preventDefault();
       const q = b.getAttribute('data-q');
       const d = GX.cache[cid] || {};
-      const baseP = (d.base && d.base.price) || 0;
+      const baseP = bidBase(d.base && d.base.price);
       const tot = (d.base && d.base.amount) || 0;
       const bd = d.bid || { users: 0, filled: 0, price: 0, amount: 0 };
       const myAll = bd.price > 0 && bd.amount > 0 ? bd.price * bd.amount : 0;
@@ -12244,7 +12554,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       upd();
     });
 
-    priceIn.addEventListener('input', upd);
+    priceIn.addEventListener('input', () => {
+      priceTouched = true;
+      upd();
+    });
     amountIn.addEventListener('input', upd);
     upd();
 
@@ -12274,7 +12587,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const refresh = async () => {
       await gxData(cid, true);
-      fill();
+      const d = GX.cache[cid] || {};
+      fill(!d.base && !d.bid);
       const now = gxBox();
       if (now && String(now.cid) === String(cid)) {
         gxDrawAuction(now, GX.cache[cid] || {});
@@ -12294,9 +12608,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         return;
       }
       const baseNow = ((GX.cache[cid] || {}).base || {}).price || base;
-      if (baseNow && price < baseNow) {
+      if (baseNow && price + 1e-9 < baseNow) {
         msg.className = 'tgtk-gxmsg tgtk-gxbad';
-        msg.textContent = `出价不能低于底价 ₵${fmt(baseNow, 2)}。`;
+        msg.textContent = `出价不能低于底价 ₵${fmt(bidBase(baseNow), 2)}。`;
         return;
       }
       if (S.gxBidWarn) {
@@ -16029,6 +16343,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
   }
 
+  function pinCleanHeaders(win, r) {
+    try {
+      const hs = new win.Headers(r.headers);
+      ['content-length', 'content-encoding', 'transfer-encoding'].forEach((k) => {
+        try { hs.delete(k); } catch (e) {}
+      });
+      return hs;
+    } catch (e) {
+      return r.headers;
+    }
+  }
+
   function pinInstallWin(win) {
     if (!win) return;
     try {
@@ -16061,7 +16387,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
                     }
                     const out = pinRewriteText(txt, url);
                     if (out === null || typeof win.Response !== 'function') return r;
-                    return new win.Response(out, { status: r.status, statusText: r.statusText, headers: r.headers });
+                    return new win.Response(out, {
+                      status: r.status, statusText: r.statusText,
+                      headers: pinCleanHeaders(win, r),
+                    });
                   })
                   .catch(() => r);
               } catch (e) {
@@ -17382,6 +17711,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   }
   function locateHasAny() {
     if (locatePanelRoot()) return true;
+    if (locateOldRoot()) return true;
     return !!locateGridAny();
   }
 
@@ -17586,7 +17916,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       locatePending = { cid: '', at: 0 };
       return;
     }
-    if (!locateGridAny()) return;
+    if (!locateGridAny() && !locateOldRoot()) return;
     locatePendingBusy = true;
     const id = locatePending.cid;
     locatePending = { cid: '', at: 0 };
@@ -17646,6 +17976,42 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       }
     } catch (e) {}
     return null;
+  }
+  function locateMarkAll(d) {
+    const loc = pinLocateGet();
+    if (!loc) return null;
+    const list = loc.cids || [];
+    let first = null;
+    for (let i = 0; i < list.length; i++) {
+      let one = null;
+      try { one = locateCardOf(d, list[i]); } catch (e) {}
+      if (!one) continue;
+      if (!first) first = one;
+      try {
+        const el = locateNameOf(one);
+        if (el && !el.classList.contains('tgtk-locate-name')) el.classList.add('tgtk-locate-name');
+      } catch (e) {}
+    }
+    return first;
+  }
+  function locateMarkAllDocs() {
+    for (const d of allDocs()) {
+      try { locateMarkAll(d); } catch (e) {}
+    }
+  }
+  let locateMo = null;
+  function locateWatchOnce(el, ms) {
+    try {
+      if (locateMo) { try { locateMo.disconnect(); } catch (e) {} locateMo = null; }
+      if (!el || !el.ownerDocument) return;
+      const doc = el.ownerDocument;
+      const mo = new MutationObserver(() => { try { locateMarkAll(doc); } catch (e) {} });
+      mo.observe(el, { childList: true, subtree: true });
+      locateMo = mo;
+      setTimeout(() => {
+        try { if (locateMo === mo) { mo.disconnect(); locateMo = null; } } catch (e) {}
+      }, ms || 6000);
+    } catch (e) {}
   }
   function locateTick(d) {
     const loc = pinLocateGet();
@@ -17769,6 +18135,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           starMapLoad(owner);
         }
         d.querySelectorAll('#grail .grail_list .item, #grail .temple_list .item').forEach((card) => {
+          if (card.closest && card.closest('.link_list, .chara_list, .init_list')) return;
           const cid = starCidOf(card);
           if (cid) pinPillFor(card, cid);
           if (cid && S.gxStarPill && owner && cid in starMap) starPillPaint(card, starMap[cid]);
@@ -19382,7 +19749,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.90（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.96（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -19455,7 +19822,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.90', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.96', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
         starPillPaint, starPillRestore,
@@ -19493,10 +19860,43 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         pinLocateGet, pinLocateSet, pinLocateClear, pinLocateHas, pinOrdered, pinOn, locateTick, locateCardOf,
         locateRefreshBtns, templeLiveRefresh, templeLiveOld, locateCurrentPage, pinToggle, botToggle, gcApplyOld,
         locateFindCard, locateHosts, locateReopenPop, locateRun,
+        locateOldRoot, locateOldKick, locateRunOld, locateHasAny, locateMarkAll, pinDecorTick,
         locateGrids, locateGridAny, locateCardAny, locateHasAny,
         pinPageCids: (pg) => (pinPages[pg] && pinPages[pg].items ? pinPages[pg].items.map((x) => String(x.CharacterId)) : null),
         pinAllReset: () => { pinAll.at = 0; pinAll.items = null; pinAll.busy = null; pinAll.failAt = 0; pinAll.user = ''; },
         pinLists: () => ({ pins: pinList(), bots: botList(), on: !!TUI.on }),
+        fetchAllHoldings, refreshSdTarget, postMagic, pinCleanHeaders, icoWithLock,
+        sdTargetInfo: () => sdTargetInfo,
+        sdSetInfo: (o) => { sdTargetInfo = o; },
+        sdSetTarget: (v) => { S.sdTarget = String(v || ''); persist(); },
+        scanHoldings, togglePanel,
+        holdState: () => ({ n: holdAll.length, at: holdAt }),
+        holdStatus: () => (els ? els.holdStat.textContent : ''),
+        scanLogs,
+        logState: () => ({
+          n: logAll.length,
+          cached: logCache ? logCache.items.length : 0,
+          coveredFrom: logCache ? logCache.coveredFrom : 0,
+          truncated: logCache ? !!logCache.truncated : false,
+          pages: logCache ? logCache.pages : 0,
+        }),
+        logSetRange: (from, to, days) => {
+          S.logDays = days === undefined ? 'custom' : days;
+          if (from !== undefined) S.logFrom = from;
+          if (to !== undefined) S.logTo = to;
+        },
+        logClearCache: () => { logCache = null; logAll = []; },
+        logStatus: () => (els ? els.logStat.textContent : ''),
+        magicRun: runMagic,
+        magicSetTimes: (mode, n) => {
+          S.mTimesBy = Object.assign({}, S.mTimesBy, { [mode]: Math.max(1, Math.floor(num(n) || 1)) });
+        },
+        magicSetChars: (from, to) => { S.mFrom = from || ''; S.mTo = to || ''; },
+        gxOpenBid,
+        gxData,
+        gxCacheSet: (cid, o) => { GX.cache[cid] = o; },
+        gxBidPop: () => document.getElementById('tgtk-gxpop'),
+        gxHidePop,
       };
     }
   } catch (e) {}

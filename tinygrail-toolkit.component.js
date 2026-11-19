@@ -334,9 +334,39 @@
  *        线的位置会随所选的那一半移动到对应的边界上。
  *      + LINK 圣殿一律不给「复制 / 修改」（新旧版一致），判定出来之前也先不显示
  *
+ *  15) 不乱花钱 / 不拿错数据（v2.3.93）
+ *      + 非幂等的 POST（道具 / 刮刮乐 / 星光碎片 / ICO 注资）不会随手重发：只有服务端明确回
+ *        429（确定没执行）才自动重试 2 次，网络错误 / 业务报错一律一次就停 —— 后者可能已经生效，
+ *        重发就是重复消耗。刮刮乐中途异常会停掉后续并写「结果未确认，先核对账户记录」
+ *      + ICO 自动注资加了跨标签页互斥（Web Locks）：两个标签页同时开着也只有一个真补款，
+ *        抢不到锁的那个让 6 秒再看；浏览器不支持 Web Locks 时照常执行，不会因为没锁罢工
+ *      + 星光碎片先现读目标塔再取数：切换目标后不会再拿上一座塔的固资 / 上限去估算。
+ *        目标读不到时只降级（这一轮不预估上限、日志写一行 warn），不会中止已经备好的燃料队列
+ *      + 持股扫描会记住失败的页：有页没读回来就标「扫描不完整（已读 x / y，失败页 N）」，
+ *        不写进 60 秒缓存，下次进来重新扫 —— 免得拿半份数据算「距下一级还差多少股」
+ *      + 接管 fetch 改写响应体时会重建 Response 并清掉 content-length / content-encoding /
+ *        transfer-encoding（原来只是靠浏览器容忍）
+ *
+ *  16) 账本增量统计 + 两处显示（v2.3.94）
+ *      + 账本不再每次点「统计」都把几十页重拉一遍：资金日志只增不改，所以同一时间范围重扫时
+ *        只补「比上次最新一条更新」的头部增量（通常 1 个请求），其余直接从内存缓存里过滤。
+ *        缓存命中时状态栏会写「沿用上次统计（没有新记录）」/「新增 N 条，其余沿用上次统计」
+ *      + 第一次读改成分块并发（一次 5 页）：202 天的账本有 92 页，以前一页一页 sleep 140ms
+ *        要一两分钟，现在快得多；页数上限从 40 页（8000 条）放宽到 150 页，
+ *        真撞到上限会在状态栏写明「只读到第 N / M 页」，不再静默截断
+ *      + 换时间范围现在一定会重算（命中缓存基本只发 1 个请求）；
+ *        实测拿 313 天 / 13725 条：首次约 60 秒，之后每次点统计都是瞬间
+ *      + 一键每日任务里的混沌魔方：不再只给一句「共获得 244 股」，
+ *        跟刮刮乐一样逐次列出「#1 珂赛特·施耐德 +154 股（₵16.20/股）」——
+ *        每次抢到的角色都不一样，不列出来根本不知道拿到了谁。
+ *        顺手修掉一个老 bug：以前把抢到的角色名记到了炮塔头上（nameCache[to]）
+ *      + 旧版竞拍浮层的默认出价不再填 50.3042572283150 这种原始浮点，
+ *        改成「界面显示的两位小数」；只有两位小数比真实底价低时才上抬一分
+ *        （站点自己的弹窗用 Math.ceil 直接取整到 51，就是怕被判「低于底价」）
+ *
  * 安装（组件方式）：
  *   https://bgm.tv/dev/app/create → 应用名随意 → 类型选「组件」→ 创建
- *   → 添加新版本 → 版本号填 2.3.90（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
+ *   → 添加新版本 → 版本号填 2.3.96（每次 +0.0.1，不能重复）→ 把本文件全部内容粘进「脚本」框 → 创建
  *   → 个人设置 - 超合金组件 - 启用
  *
  * 说明：
@@ -761,6 +791,18 @@
   let logAll = [];
   /** 账本当前统计窗口（自然日）：from = 第一天 0:00，to = 最后一天 24:00 */
   let logWindow = null;
+  /**
+   * 账本日志的增量缓存（v2.3.94）。
+   * 资金日志是**只增不改**的：已经发生的记录永远不会变，所以同一个时间范围重扫时
+   * 唯一会变的是「比上次最新一条更新的那些」。这里存下上次读到的原始记录，
+   * 下次只补头部增量，其余直接复用 —— 否则每点一次「统计」都把 92 页重拉一遍。
+   *   items       已读记录（新 → 旧），按 key 去重
+   *   coveredFrom 已经「读全」到哪个时间点（毫秒）：比它新的记录一条不缺。
+   *               注意不能拿「最旧一条的时间」当这个值 —— 扫到窗口下界就停了，
+   *               最旧那条通常比下界还新，用它判断会永远判定「没覆盖」，等于每次都重扫。
+   *   truncated   是否读满页数上限就停了（这时更早的数据本来也拿不到，可以放心复用）
+   */
+  let logCache = null;
   let magicRunning = false;
   let starRunning = false;
   const starCapCache = Object.create(null); // 角色 → 塔的固资上限（读过一次就记住，用于消耗估算）
@@ -3452,6 +3494,124 @@
     return best || 24;
   }
 
+  /* ---- 旧版（jQuery）个人页的定位 --------------------------------------------
+   *  旧版**没有** `#tg-temple` 网格，也没有「跳至」输入框：列表是
+   *  `#grail .temple_list > ul.grail_list.pageN`（**每页缓存一个 ul**，点页码命中缓存就不发请求），
+   *  分页器是 `#pager1 .p[data-page=N]`，tab 是 `#templeTab`（只切显示、不重新加载）。
+   *  所以旧版的「踢一次刷新」= 清掉所有页缓存 + 点第 1 页。 */
+  function locateOldRoot() {
+    for (const d of allDocs()) {
+      let box = null;
+      try { box = d.querySelector('#grail .temple_list'); } catch (e) {}
+      if (!box) continue;
+      let tab = null;
+      try { tab = d.querySelector('#templeTab'); } catch (e) {}
+      if (!tab) continue;          // 没有这套 tab 就不是旧版个人页
+      return { doc: d, box: box, tab: tab };
+    }
+    return null;
+  }
+
+  /** 旧版：清掉全部页缓存，再让站点重拉第 1 页。
+   *  有分页器就点页码；只有一页（没有 #pager1）就调站点自己的 loadUserTemples ——
+   *  两条路都不通时**先别删缓存**，否则列表会被清成一片空白。 */
+  function locateOldKick(page) {
+    const o = locateOldRoot();
+    if (!o) return false;
+    const d = o.doc;
+    const want = String(page || 1);
+    let btn = null;
+    try { btn = d.querySelector('#pager1 .p[data-page="' + want + '"]'); } catch (e) {}
+    let w = null;
+    let name = '';
+    try {
+      w = d.defaultView || window;
+      const g = d.querySelector('#grail');
+      name = g ? String(g.getAttribute('data-name') || '') : '';
+    } catch (e) {}
+    const canFn = !!(name && w && typeof w.loadUserTemples === 'function');
+    if (!btn && !canFn) return false;
+    try {
+      const cached = o.box.querySelectorAll('.grail_list');
+      for (let i = 0; i < cached.length; i++) cached[i].remove();
+    } catch (e) {}
+    try {
+      if (btn) { btn.click(); return true; }
+      w.loadUserTemples(Number(want) || 1, name);
+      return true;
+    } catch (e) {}
+    return false;
+  }
+
+  /** 旧版个人页的定位主流程（新版那套 locateRun 的等价物） */
+  async function locateRunOld(id, nm) {
+    const o = locateOldRoot();
+    if (!o) return false;
+    // 停在「连接 / 人物」tab 时只是 display:none，切一下就好（数据早就拉过了）
+    try { if (o.box.style.display === 'none') o.tab.click(); } catch (e) {}
+    if (!pinAllGet()) {
+      setTempleStatus('正在读你的圣殿列表…');
+      try { await pinAllLoad(); } catch (e) {}
+    }
+    try { pinLocateSet(id); } catch (e) {}
+    locateRefreshBtns();
+    const t0 = Date.now();
+    setTempleStatus('正在把它排到第 1 页…');
+    locateWatchOnce(o.box, 6000);      // 换页那一刻就把粉色补回去，别等 tick
+    if (!locateOldKick(1)) {
+      // 分页器还没渲染好：先把当前能认出来的那张标粉，切一次分页就会排好
+      const c0 = locateCardAny(id);
+      if (c0) {
+        try {
+          const el0 = locateNameOf(c0);
+          if (el0) el0.classList.add('tgtk-locate-name');
+          c0.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (e) {}
+        setTempleStatus('已标记 ' + nm + '：切一次分页就排到最前');
+        try { pinToast('已标记：切一次分页就排到最前'); } catch (e) {}
+        return true;
+      }
+      setTempleStatus('分页器还没渲染好：稍等一下再点定位，或手动切一次分页');
+      return false;
+    }
+    // 等这一轮的第 1 页回来（改写后的顺序才算数）
+    let rec = null;
+    for (let i = 0; i < 14; i++) {
+      await sleep(300);
+      const one = pinPages[1];
+      if (one && one.at >= t0 && one.items && one.items.length) { rec = one; break; }
+    }
+    let idx = -1;
+    if (rec && rec.items) {
+      for (let i = 0; i < rec.items.length; i++) {
+        const it = rec.items[i];
+        if (it && String(it.CharacterId) === id) { idx = i; break; }
+      }
+    }
+    // DOM 要晚一拍才重画完：等那张卡真的出现（对 id，别标到马上被换掉的旧节点上）
+    let card = null;
+    for (let r = 0; r < 16; r++) {
+      locateMarkAll(o.doc);            // 上一批定位的那几座也一起补，别让它们先黑一下
+      card = locateCardAny(id);
+      if (card) break;
+      await sleep(r < 8 ? 120 : 250);
+    }
+    if (!card) {
+      setTempleStatus('没排上：这一轮没拿回你的列表（站点可能用了缓存），刷新一次页面再点定位');
+      try { pinToast('没排上：刷新一次页面再点定位'); } catch (e) {}
+      return false;
+    }
+    try {
+      const el = locateNameOf(card);
+      if (el && !el.classList.contains('tgtk-locate-name')) el.classList.add('tgtk-locate-name');
+      card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (e) {}
+    const pos = idx >= 0 ? `第 ${idx + 1} 个` : '已高亮';
+    setTempleStatus(`已定位：${nm} 排在第 1 页${pos}（角色名已标粉）`);
+    try { pinToast('已定位：' + nm + ' 排在第 1 页' + pos); } catch (e) {}
+    return true;
+  }
+
   /** 当前这一页的分页控件：从网格往上找同一层的 #tg-pagination
    *  （别的 tab 也有同名 id，别拿错，否则会去翻别人的列表） */
   function locatePagerOf(grid) {
@@ -3671,6 +3831,8 @@
   }
 
   async function locateRun(id, nm) {
+    // 旧版个人页是另一套 markup（ul.grail_list 缓存式分页）：单独走一条
+    if (locateOldRoot()) return await locateRunOld(id, nm);
     // 浮窗开着但停在别的 tab：先切到「N座圣殿」
     if (!locateGridAny()) {
       setTempleStatus('正在切到「N座圣殿」…');
@@ -3737,7 +3899,8 @@
     // 数据层回来了，DOM 还要一拍才重画完 —— 等那张卡真的出现（并核对 id），
     // 否则会把 class 加到马上被替换掉的旧节点上（看着像「没标粉」）
     let card = null;
-    for (let round = 0; round < 12; round++) {
+    for (let round = 0; round < 16; round++) {
+      locateMarkAllDocs();             // 一次重拉会把别的定位卡的粉色冲掉：每轮都补
       const g2 = locateGridAny();
       if (idx >= 0 && g2 && g2.children && g2.children[idx]) {
         const c2 = g2.children[idx];
@@ -3750,7 +3913,7 @@
       }
       card = locateCardAny(id);
       if (card) break;
-      await sleep(250);
+      await sleep(round < 8 ? 120 : 250);
     }
     if (!card) {
       setTempleStatus(`没排上：这一轮没拿回你的列表（站点可能用了缓存），刷新一次页面再点定位`);
@@ -3950,10 +4113,14 @@
    * 原来是「一页一页串行 + 每页固定 sleep 140ms」：3700 只 = 38 轮，十几秒才出结果，
    * 老玩家一两万持股更是等到以为卡死。
    */
+  /** 拉某个人的全部持股。
+   *  返回 { items, total, complete, failedPages } —— complete=false 表示有页没拿回来，
+   *  这时**不能**把它当完整缓存用（不然 5 分钟内都拿这份缺页的数据当准）。 */
   async function fetchAllHoldings(key, opt) {
     const alive = (opt && opt.alive) || (() => true);
     const onProgress = (opt && opt.onProgress) || (() => {});
     const K = encodeURIComponent(key);
+    const failedPages = [];
     const first = await api(`chara/user/chara/${K}/1/${PAGE_SIZE}`);
     const got = ((first && first.Items) || []).slice();
     const total = num(first && first.TotalItems) || got.length;
@@ -3972,7 +4139,8 @@
             onProgress(got.length, total);
             return;
           } catch (e) {
-            if (attempt) return;
+            // 重试一次还是失败：记下页码，最后告诉调用方「这次没读全」
+            if (attempt) { failedPages.push(p); return; }
             await sleep(250);
           }
         }
@@ -3988,7 +4156,9 @@
       seen.add(id);
       items.push(it);
     }
-    return { items, total };
+    // 张数对不上也算不完整（页接口偶尔会少给几条）
+    const complete = failedPages.length === 0 && items.length >= total;
+    return { items, total, complete, failedPages };
   }
 
   async function scanHoldings() {
@@ -4036,11 +4206,20 @@
         if (r.items.length) key = me;
       }
       holdAll = r.items;
-      holdAt = nowMs();
+      // 不完整的数据不进入 60 秒 / 5 分钟的正常缓存周期：下次进来还得重新扫
+      holdAt = r.complete === false ? 0 : nowMs();
       sugCache.clear();
       sugIdCache.clear();
       renderHoldings();
 
+      if (r.complete === false) {
+        setHoldStatus(
+          `持仓扫描不完整：已读 ${holdAll.length} / ${r.total || '?'}` +
+            (r.failedPages && r.failedPages.length ? `，失败页 ${r.failedPages.join('、')}` : '') +
+            ' · 建议重新扫描'
+        );
+        return;
+      }
       if (holdAll.length && holdAll.every((x) => num(x.UserAmount) === 0)) {
         setHoldStatus(`持仓 ${holdAll.length} 只，但数量全是 0：可能未登录小圣杯，或浏览器拦截了第三方 cookie`);
       }
@@ -5253,13 +5432,18 @@
    * 发一次道具请求。网络抖动 / 偶发 5xx 自动重试一次（隔 2 秒），
    * 次数上限、资产不足这类硬性错误不重试——重试也只会白烧一次机会。
    */
+  /** 道具执行用的 POST。**不做无条件自动重试**。
+   *  一次 POST 超时 / 断流，不代表服务端没执行 —— 它可能已经扣掉一个道具、把股打进来了，
+   *  只是响应在回程路上丢了。这时再发一次，就等于白烧一个道具。
+   *  唯一能确定「确实没执行」的是限流（429）：那种情况重试是安全的，也只重试这一种。 */
   async function postMagic(path, attempt) {
     try {
       return await api(path, { method: 'POST', body: '{}' });
     } catch (err) {
       const msg = String((err && err.message) || err);
-      if ((attempt || 0) < 1 && !isQuotaMagicError(msg) && !/不足/.test(msg)) {
-        await sleep(2000);
+      const rateLimited = /HTTP\s*429|Too Many Requests|请求过于频繁|操作太频繁/i.test(msg);
+      if (rateLimited && (attempt || 0) < 2) {
+        await sleep(2000 + 1500 * (attempt || 0));
         return postMagic(path, (attempt || 0) + 1);
       }
       throw err;
@@ -5322,6 +5506,8 @@
       let value = 0;
       let stopped = false;
       let retryLeft = 3; // 整批最多「补充后重试」3 次，防止任何异常状态下打转
+      // 每次成功「抢到谁、多少股」：混沌魔方每次都是不同的角色，一键每日任务要逐个列出来
+      const hits = [];
 
       for (let i = 1; i <= times; i++) {
         if (!magicRunning) {
@@ -5347,13 +5533,22 @@
           if (assetsLeft !== null) assetsLeft = Math.max(0, assetsLeft - def.cost);
           const amount = num(v && (v.Amount ?? v.amount));
           const price = num(v && (v.CurrentPrice ?? v.Current));
-          const name = (v && v.Name) || toName;
+          // 混沌魔方每次抢到的角色都不一样，接口把「抢到谁」放在 Name / Id 里；
+          // 道标 / 鲤鱼之眼的目标是固定的，用 toName 兜底即可。
+          const gotId = num(v && (v.Id ?? v.CharacterId ?? v.CharaId)) || 0;
+          const name = (v && v.Name) || (gotId ? nameCache[gotId] || '' : '') || toName;
           // 鲤鱼之眼返回的是一句结果文案，没有股数字段
           const detail = typeof v === 'string' ? v : v && typeof v.Message === 'string' ? v.Message : '';
           ok++;
           gain += amount;
           value += amount * price;
-          if (v && v.Name) nameCache[to] = v.Name;
+          // 名字要记在「真正变动股数的角色」上：混沌魔方是随机抢到的那个人。
+          // 以前一律记成 nameCache[to]，而混沌的 to 就是炮塔自己 —— 于是炮塔的名字被改成了抢到的那个人。
+          if (v && v.Name) {
+            if (gotId) nameCache[gotId] = v.Name;
+            else if (def.needTarget) nameCache[to] = v.Name;
+          }
+          if (amount > 0) hits.push({ i, name, amount, price });
           pushMagicLog(
             h(
               'div',
@@ -5440,7 +5635,7 @@
         if (left !== undefined) pushMagicLog(h('div', { class: 'tgtk-log tgtk-log-info' }, `剩余「${def.name}」${fmt(left)} 个`));
       }
       // 给「一键每日任务」用：把这一轮的结果交回去（UI 上照常写 mStat / mLog）
-      return { ok, fail, gain, value, stopped, text: summary };
+      return { ok, fail, gain, value, stopped, text: summary, hits };
     } finally {
       magicRunning = false;
       busy = false;
@@ -5794,10 +5989,10 @@
       // 候选浮层的搜索缓存要跟着更新：否则刚读到的这些角色不会出现在联想框里
       sugCache.clear();
       sugIdCache.clear();
-      // 回填给「持股」页，避免它再扫一遍
+      // 回填给「持股」页，避免它再扫一遍（没读全就别当缓存）
       if (sdHold.length) {
         holdAll = sdHold.slice();
-        holdAt = nowMs();
+        holdAt = r.complete === false ? 0 : nowMs();
       }
 
       if (!sdHold.length) {
@@ -5807,7 +6002,14 @@
       // 旧版「单只燃料」升级成队列时会带进历史 ID；读全持仓后，
       // 把完全不在持仓里的清掉（这种角色不可能有活股，还找不到地方取消）
       // 只在「确实读全了」时清理，分页没读完就别动用户的队列
-      const complete = r.total > 0 && sdHold.length >= r.total;
+      const complete = r.complete === true || (r.complete === undefined && r.total > 0 && sdHold.length >= r.total);
+      if (r.complete === false) {
+        setSdStatus(
+          `持股没读全（已读 ${sdHold.length} / ${r.total || '?'}` +
+            (r.failedPages && r.failedPages.length ? `，失败页 ${r.failedPages.join('、')}` : '') +
+            '），燃料队列先不动，可以点「读取持股」重试'
+        );
+      }
       let pruned = 0;
       if (complete) {
         const have = new Set(sdHold.map((x) => String(x.CharacterId)));
@@ -6068,9 +6270,14 @@
   }
 
   /** 读取目标塔当前固资，顺便确认「他是不是你的塔」 */
+  /** 读目标塔的等级 / 固资 / 上限。
+   *  返回 true / false —— 执行前要靠这个返回值判断「这轮的数字是不是目标塔自己的」。
+   *  失败时不弹错（界面上静默，执行时由调用方决定要不要提示），
+   *  但**必须把不属于当前目标的旧缓存清掉**：否则切了目标还留着上一座塔的数字，
+   *  上限预估会按错的基准算（v2.3.93 修）。 */
   async function refreshSdTarget() {
     const to = parseCharId(S.sdTarget);
-    if (!to) return;
+    if (!to) { sdTargetInfo = null; return false; }
     try {
       await loadNames([to]);
       const lv = await fetchTargetLevel(to);
@@ -6079,7 +6286,7 @@
         sdTargetInfo = null;
         setSdStatus(`#${to}「${charaName(to)}」不是你的圣殿（或未登录），无法作为目标`);
         renderSdPick();
-        return;
+        return false;
       }
       sdTargetInfo = {
         cid: String(to), lv: lv || 0,
@@ -6088,8 +6295,11 @@
       };
       // 目标信息现在直接显示在燃料队列那一行，不再往下面的日志里塞一条
       renderSdPick();
+      return true;
     } catch (e) {
       /* 读不到就静默，执行时再报 */
+      if (sdTargetInfo && String(sdTargetInfo.cid) !== String(to)) sdTargetInfo = null;
+      return false;
     }
   }
 
@@ -6222,15 +6432,25 @@
     const touched = [];
     // 目标等级 / 上限 / 当前固资：用来判断「这一只充完是不是已经冲过上限」。
     // 冲过之后站点会拒绝后续充能，先停下来，别把剩下的燃料白试一遍。
-    const lvB = sdTargetInfo && sdTargetInfo.lv ? Math.floor(sdTargetInfo.lv) : 0;
-    const capNow = sdTargetInfo ? num(sdTargetInfo.cap) : 0;
-    let assetsNow = sdTargetInfo ? num(sdTargetInfo.assets) : 0;
+    // **必须在读过目标塔之后再取**（见下面 try 里）：这三个值只对「同一座塔的同一时刻」有意义，
+    // 早取一步就会拿上一座塔的固资 / 上限去做判断（v2.3.93 修）。
+    let lvB = 0;
+    let capNow = 0;
+    let assetsNow = 0;
 
     try {
       await loadNames(queue.concat([to]));
-      // 估算要用目标的等级 / 固资 / 上限：没读过就先读一次（跟日志共用一次请求）
-      if (!sdTargetInfo || String(sdTargetInfo.cid) !== String(to)) await refreshSdTarget();
-      const toName = charaName(to);
+      /* 每次执行都现读一次目标塔：面板开着时的那份可能是几分钟前、甚至上一个目标的。
+         读不到也不拦着充能（网络抖一下不该让整轮燃料白准备）—— 只是这轮不做上限预估，
+         并在日志里说一句，免得「预计 +N」看着像准的。 */
+      const targetOk = await refreshSdTarget();
+      const usingTarget = targetOk && sdTargetInfo && String(sdTargetInfo.cid) === String(to);
+      const snap = usingTarget ? sdTargetInfo : null;
+      lvB = snap && snap.lv ? Math.floor(snap.lv) : 0;
+      capNow = snap ? num(snap.cap) : 0;
+      assetsNow = snap ? num(snap.assets) : 0;
+      const toName = (snap && snap.name) || charaName(to);
+      if (!usingTarget) log('warn', `没读到「${toName}」的塔信息：本轮不做上限预估，充到站点拒绝就停`);
       log('info', `本次共消耗 ${fmt(amt)} 股 → 补充「${toName}」的固定资产 · 燃料队列 ${queue.length} 只，按顺序扣`);
 
       for (let i = 0; i < queue.length && left > 0; i++) {
@@ -6679,6 +6899,28 @@
    *   1) 还在窗口里（剩余 ≤ 提前分钟数）→ 按缺口补到目标等级；
    *   2) 结束时间已过但没处理过（页面关着 / 关机错过）→ 核对一次：
    *      真结束了就如实记录，被延期了就更新结束时间继续等。 */
+  /** 跨标签页互斥：同一个 ICO 计划只允许一个实例真正去注资。
+   *  claimAt 只是个写在 localStorage 里的「占位」，两个标签页各自持有的内存状态可能同时通过检查 ——
+   *  真锁交给浏览器的 navigator.locks（同源所有标签页共享）。 */
+  async function icoWithLock(id, task) {
+    const locks = (() => {
+      try { return navigator.locks; } catch (e) { return null; }
+    })();
+    if (!locks || typeof locks.request !== 'function') {
+      // 老浏览器没有 Web Locks：退回原来的做法（照常执行），不因为拿不到锁就罢工
+      return await task();
+    }
+    try {
+      return await locks.request('tgtk:ico:' + id, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+        // 别的标签页正在补这一笔：这次直接让开，过几秒再看
+        if (!lock) return { busy: true };
+        return await task();
+      });
+    } catch (e) {
+      return await task();
+    }
+  }
+
   async function icoAutoCheck() {
     if (icoAutoRunning) return;
     const plans = icoPlans();
@@ -6768,18 +7010,27 @@
           pushIcoLog('warn', `「${p.name}」补到 Lv${p.lv} 需要 ₵${fmt(need)}，可用余额只剩 ₵${fmt(leftBal)}`);
           continue;
         }
-        // 先在本机「占位」再发请求：万一组件 iframe 正好在这几秒里重载，
-        // 新实例看到占位就不会把同一笔补款再投一次。
-        const cur2 = icoCfgOf(p.id) || {};
-        S.icoCfg[p.id] = Object.assign({}, cur2, { claimAt: Date.now() });
-        persist();
-        try {
-          await api(`chara/join/${v.icoId || p.id}/${need}`, { method: 'POST', body: '{}' });
-          leftBal -= need;
-          icoFinish(p.id, 'ok', `「${p.name}」自动注资 ₵${fmt(need)} → 目标 Lv${p.lv}`);
-        } catch (e) {
-          icoFinish(p.id, 'fail', `「${p.name}」注资失败：${e && e.message ? e.message : e}`);
-        }
+        /* 真正注资这一下必须防重复：
+           - 先在本机「占位」再发请求：万一组件 iframe 正好在这几秒里重载，新实例看到占位就不会再投一次
+           - 再套一层 navigator.locks：两个标签页同时开着时，只有抢到锁的那个能发这笔 POST
+           抢不到锁就当「别人正在补」，本轮跳过、让它接着跑。 */
+        const locked = await icoWithLock(p.id, async () => {
+          const cur2 = icoCfgOf(p.id) || {};
+          // 抢到锁之后再看一眼：可能刚被另一个实例补完并关掉了计划
+          if (!cur2.on || icoDone.has(p.id)) return { skip: true };
+          S.icoCfg[p.id] = Object.assign({}, cur2, { claimAt: Date.now() });
+          persist();
+          try {
+            await api(`chara/join/${v.icoId || p.id}/${need}`, { method: 'POST', body: '{}' });
+            icoFinish(p.id, 'ok', `「${p.name}」自动注资 ₵${fmt(need)} → 目标 Lv${p.lv}`);
+            return { paid: true };
+          } catch (e) {
+            icoFinish(p.id, 'fail', `「${p.name}」注资失败：${e && e.message ? e.message : e}`);
+            return { failed: e };
+          }
+        });
+        if (locked && locked.paid) leftBal -= need;
+        else if (locked && locked.busy) icoCool.set(p.id, Date.now() + 6000);
       }
       if (S.tab === 'ico') await loadIco(true);
     } catch (e) {
@@ -6792,7 +7043,16 @@
   /* ------------------------------ 资金日志 ------------------------------ */
 
   const LOG_PAGE = 200;
-  const LOG_MAX_PAGE = 40;
+  /* 分块并发：一次读几页。读接口不是写，几页并发不会互相影响，
+     92 页从「一页一页 sleep 140ms」变成分组并发，第一次读的时间砍到 1/5 左右。 */
+  const LOG_BLOCK = 5;
+  /* 头部增量最多往上找几页（撞上上次最新那条就停）。隔太久没来才会用到后面几页，
+     超出这个量就说明缓存不靠谱，宁可整份重读。 */
+  const LOG_HEAD_PAGE = 10;
+  /* 页数上限（= 条数上限 / LOG_PAGE）。以前是 40（8000 条），
+     202 天的账本有 92 页，直接被截断还看不出来；现在放宽到 150（3 万条），
+     真撞到上限会在状态栏写明「只读到第 N / M 页」。 */
+  const LOG_MAX_PAGE = 150;
   /** 个人所得税（股息税）在日志里是单独一条负数记录 */
   const TAX_RE = /个人所得税|所得税|股息税/;
 
@@ -7444,11 +7704,18 @@
     return { rows: rows.slice(0, top), count: rows.length, dir, kind, val };
   }
 
+  /** 一条资金日志的唯一身份：优先用服务端 id，没有就拼一个内容指纹（时间 + 类型 + 数额 + 描述） */
+  function logKey(x) {
+    if (!x) return '';
+    const id = x.Id ?? x.LogId;
+    if (id !== undefined && id !== null && id !== '') return 'i' + id;
+    return [x.LogTime, x.Type, x.Change, x.Amount, x.RelatedId, x.Description].join('\u0001');
+  }
+
   async function scanLogs() {
     if (busy) return;
     busy = true;
     setButtonsDisabled(true);
-    logAll = [];
     els.logList.textContent = '';
 
     try {
@@ -7457,35 +7724,127 @@
       const winFrom = range.from;
       const winTo = range.to;
       logWindow = range;
-      const cutoff = winFrom;
-      let page = 1;
-      let pages = 1;
-      let reached = false;
 
-      do {
-        if (!busy) break;
-        const v = await api(`chara/user/balance/${page}/${LOG_PAGE}`);
-        const items = v.Items || [];
-        pages = num(v.TotalPages) || 1;
+      /* ---------- 1) 上次读到的原始记录还能不能接着用 ----------
+         资金日志只增不改：已发生的记录永远不会变，所以同一段范围重扫时
+         唯一会变的是「比上次最新一条更新的那些」。
+         缓存覆盖到本次下界（或者上次本来就撞到页数上限、更早的也拿不到）就能复用。 */
+      const cache = logCache;
+      const canReuse = !!(
+        cache &&
+        cache.items &&
+        cache.items.length &&
+        (cache.truncated || (cache.coveredFrom && cache.coveredFrom <= winFrom))
+      );
+      let list = canReuse ? cache.items.slice() : [];
+      const seen = new Set(list.map(logKey));
+      let pages = canReuse ? num(cache.pages) || 0 : 0;
+      let reached = canReuse; // 复用 = 这段范围本来就已读全
+      let truncated = canReuse ? !!cache.truncated : false;
+      let coveredFrom = canReuse ? num(cache.coveredFrom) || winFrom : winFrom;
+      let headN = 0;
 
-        for (let i = 0; i < items.length; i++) {
-          const ts = logTs(items[i].LogTime);
-          if (ts && ts < cutoff) {
-            reached = true;
-            break;
+      /* ---------- 2) 复用时只补头部增量，读到「撞上上次最新那条」为止 ---------- */
+      if (canReuse) {
+        const anchor = logKey(list[0]);
+        const fresh = [];
+        let hit = false;
+        for (let p = 1; p <= LOG_HEAD_PAGE; p++) {
+          if (!busy) break;
+          const v = await api(`chara/user/balance/${p}/${LOG_PAGE}`);
+          pages = num(v.TotalPages) || pages;
+          const items = v.Items || [];
+          if (!items.length) break;
+          for (let i = 0; i < items.length; i++) {
+            const k = logKey(items[i]);
+            if (k === anchor) { hit = true; break; }
+            if (seen.has(k)) continue;
+            seen.add(k);
+            fresh.push(items[i]);
           }
-          // 自定义区间可能以「过去的某天」结束：比结束日还新的记录要跳过（不能 break，
-          // 后面还有落在区间里的），否则选 11/05~11/07 也会把 11/08、11/09 算进来
-          if (ts && winTo && ts >= winTo) continue;
-          logAll.push(items[i]);
+          if (hit) break;
+          if (p < LOG_HEAD_PAGE) await sleep(80);
         }
+        if (hit) {
+          headN = fresh.length;
+          if (headN) list = fresh.concat(list); // fresh 是「新 → 旧」，直接接在前面
+        } else {
+          // 隔太久，增量比预想的大：别猜了，整份重读
+          list = [];
+          seen.clear();
+          reached = false;
+          truncated = false;
+        }
+      }
 
-        setLogStatus(`读取 ${logAll.length} 条…（第 ${page} / ${pages} 页）`);
-        if (reached) break;
+      /* ---------- 3) 还没读全就往下读（分块并发；读到窗口下界就停） ---------- */
+      if (!reached) {
+        const take = (items) => {
+          for (let i = 0; i < items.length; i++) {
+            const ts = logTs(items[i].LogTime);
+            // 跑到窗口之外了：不再往更老的方向读
+            if (ts && ts < winFrom) return true;
+            const k = logKey(items[i]);
+            if (seen.has(k)) continue;
+            seen.add(k);
+            list.push(items[i]);
+          }
+          return false;
+        };
 
-        page++;
-        if (page <= pages && page <= LOG_MAX_PAGE) await sleep(140);
-      } while (page <= pages && page <= LOG_MAX_PAGE);
+        // 第 1 页既是数据，也顺便拿总页数
+        const v1 = await api(`chara/user/balance/1/${LOG_PAGE}`);
+        pages = num(v1.TotalPages) || 1;
+        reached = take(v1.Items || []);
+        const lastPage = Math.min(pages, LOG_MAX_PAGE);
+
+        let nextPage = 2;
+        while (!reached && nextPage <= lastPage) {
+          if (!busy) break;
+          const block = [];
+          for (let p = nextPage; p < nextPage + LOG_BLOCK && p <= lastPage; p++) block.push(p);
+          const got = new Array(block.length);
+          // 读接口不是写：几页并发不会互相影响，单页失败也留空继续，不至于整轮白跑
+          await mapLimit(block, LOG_BLOCK, async (p, idx) => {
+            try {
+              got[idx] = await api(`chara/user/balance/${p}/${LOG_PAGE}`);
+            } catch (e) {
+              got[idx] = null;
+            }
+          });
+          for (let bi = 0; bi < got.length && !reached; bi++) {
+            if (got[bi]) reached = take(got[bi].Items || []);
+          }
+          nextPage += block.length;
+          setLogStatus(`读取 ${list.length} 条…（第 ${Math.min(nextPage - 1, lastPage)} / ${lastPage} 页）`);
+          if (nextPage <= lastPage) await sleep(100);
+        }
+        /* 把服务端**所有**页都读完了 = 底下根本没有更老的记录，
+           这也算「读全了」—— 否则账号一共只有 3 页日志时，
+           缓存会永远声称「没覆盖到这个下界」，每次点统计都重扫一遍。 */
+        if (!reached && nextPage > pages) reached = true;
+        // 只有「撞到页数上限、而且确实还有更多页」才算截断
+        truncated = !reached && nextPage > LOG_MAX_PAGE && LOG_MAX_PAGE < pages;
+      }
+
+      /* ---------- 4) 存缓存，再按本次窗口过滤 ---------- */
+      const lowestTs = list.length ? logTs(list[list.length - 1].LogTime) : 0;
+      logCache = {
+        items: list,
+        // 读到窗口下界了 → 这段范围一条不缺；只在页数上限处停下 → 只能声称读到最旧那条
+        coveredFrom: reached ? coveredFrom : lowestTs || winFrom,
+        truncated,
+        pages,
+        at: nowMs(),
+      };
+      logAll = list.filter((x) => {
+        const ts = logTs(x.LogTime);
+        if (ts && ts < winFrom) return false;
+        // 自定义区间可能以「过去的某天」结束：比结束日还新的记录不能算进来，
+        // 否则选 11/05~11/07 也会把 11/08、11/09 算进来
+        if (ts && winTo && ts >= winTo) return false;
+        return true;
+      });
 
       const nameIds = [];
       logAll.forEach((x) => {
@@ -7501,9 +7860,18 @@
       }
       renderLedger();
 
+      /* renderLedger() 自己会写一句「6 条记录 · 11/17 0:00 ~ 11/19 24:00 · 1 个角色有股数变动」，
+         这里只在这句后面补「新增 / 沿用」，别把它盖掉（以前就是被盖掉了）。 */
+      const rich = els ? els.logStat.textContent : '';
       if (!logAll.length) setLogStatus('这段时间没有资金日志');
       else if (!logStats().chars.length) {
         setLogStatus(`${logAll.length} 条日志，但接口没给出股数变化（Amount），无法统计角色`);
+      } else if (truncated) {
+        setLogStatus(`${rich} · 只读到第 ${Math.min(pages, LOG_MAX_PAGE)} / ${pages} 页（更早的还没读，缩小范围更准）`);
+      } else if (headN) {
+        setLogStatus(`${rich} · 新增 ${headN} 条，其余沿用上次统计`);
+      } else if (canReuse) {
+        setLogStatus(`${rich} · 沿用上次统计（没有新记录）`);
       }
     } catch (err) {
       if (err && err.needLogin) setLogStatus(err.message, 'login');
@@ -9192,7 +9560,9 @@
         { class: 'tgtk-note' },
         '按资金日志统计，来源按接口 Type 字段归类；只能统计自己的账号（需要登录小圣杯，' +
           '浏览器禁止第三方 Cookie 时也会读不到）。' +
-          '竞拍 / 买入记净额（扣掉返还、撤单），股息记税后，卖出只算成交的；固资数值按日志描述解析'
+          // 页数上限从常量算出来，改 LOG_MAX_PAGE 时这句会跟着变（别写死 150）
+          `单次最多读取 ${LOG_MAX_PAGE} 页日志（约 ${fmt((LOG_MAX_PAGE * LOG_PAGE) / 10000)} 万条）；` +
+          '范围太大时只读到较新的一段，状态栏会写明「只读到第 N / M 页」'
       )
     );
 
@@ -9357,6 +9727,18 @@
             if (r && r.fail) bad++;
             done++;
             dailyLogLine(r && r.fail ? 'tgtk-log-warn' : 'tgtk-log-ok', `✓ ${def.label}：${(r && r.text) || '完成'}`);
+            /* 混沌魔方每次抢到的角色都不一样，光一行「共获得 244 股」看不出抢到了谁，
+               所以跟刮刮乐一样逐个列出来（谁、多少股、单价）。
+               道标 / 鲤鱼之眼的目标是固定的，再列一遍只是重复，不再多写。 */
+            if (!def.needTarget && r && r.hits && r.hits.length) {
+              r.hits.slice(0, 8).forEach((x) => {
+                dailyLogLine(
+                  'tgtk-log-ok',
+                  `#${x.i} ${x.name} +${fmt(x.amount)} 股` +
+                    (x.price ? `（₵${fmt(x.price, x.price % 1 ? 2 : 0)}/股）` : '')
+                );
+              });
+            }
           }
           if (i < picks.length - 1 && !dailyStop) await sleep(1200);
         }
@@ -9368,31 +9750,47 @@
           let fail = 0;
           let gain = 0;
           let value = 0;
-          for (let i = 1; i <= 3; i++) {
-            if (dailyStop) break;
-            try {
-              const v = await api('event/scratch/bonus2', { method: 'POST', body: '{}' });
-              const items = Array.isArray(v) ? v : [];
-              const g = items.reduce((s, x) => s + num(x.Amount), 0);
-              const val = items.reduce((s, x) => s + num(x.Amount) * num(x.CurrentPrice), 0);
-              ok++;
-              gain += g;
-              value += val;
-              // 只挑当前价格最高的三种：同一次刮出来的股，单价高才是真赚到（总价在下面汇总行里）
-              const top = items
-                .slice()
-                .sort((a, b) => num(b.CurrentPrice) - num(a.CurrentPrice))
-                .slice(0, 3)
-                .map((x) => (x.Name || '#' + x.Id) + ' +' + fmt(num(x.Amount)))
-                .join('、');
-              dailyLogLine('tgtk-log-ok', `#${i} ${top || '开出 1 张'}${items.length > 3 ? ' 等' : ''}`);
-            } catch (e) {
-              fail++;
-              dailyLogLine('tgtk-log-fail', `#${i} 失败：${e && e.message ? e.message : e}`);
+          let aborted = '';
+          /* 刮一张就是花 1000cc。请求报错不等于没花钱 —— 可能已经扣了、只是响应丢了。
+             所以这里跟道具 / 充能保持同一条规矩：**失败就停**，把「结果未确认」说清楚，
+             别闷头把剩下两张也刮掉（那才是真的可能多花 2000cc）。
+             顺手占住「道具执行中」这个标记：刮的过程中你去点道具页的「执行」会被挡下来，
+             不会两批发 POST 撞在一起。 */
+          const wasMagicBusy = magicRunning;
+          magicRunning = true;
+          try {
+            for (let i = 1; i <= 3; i++) {
+              if (dailyStop) break;
+              try {
+                const v = await api('event/scratch/bonus2', { method: 'POST', body: '{}' });
+                const items = Array.isArray(v) ? v : [];
+                const g = items.reduce((s, x) => s + num(x.Amount), 0);
+                const val = items.reduce((s, x) => s + num(x.Amount) * num(x.CurrentPrice), 0);
+                ok++;
+                gain += g;
+                value += val;
+                // 只挑当前价格最高的三种：同一次刮出来的股，单价高才是真赚到（总价在下面汇总行里）
+                const top = items
+                  .slice()
+                  .sort((a, b) => num(b.CurrentPrice) - num(a.CurrentPrice))
+                  .slice(0, 3)
+                  .map((x) => (x.Name || '#' + x.Id) + ' +' + fmt(num(x.Amount)))
+                  .join('、');
+                dailyLogLine('tgtk-log-ok', `#${i} ${top || '开出 1 张'}${items.length > 3 ? ' 等' : ''}`);
+              } catch (e) {
+                fail++;
+                const msg = e && e.message ? e.message : String(e);
+                dailyLogLine('tgtk-log-fail', `#${i} 请求异常，结果未确认：${msg}`);
+                dailyLogLine('tgtk-log-warn', `已停止后续刮刮乐（避免重复花费），请先核对账户记录再手动继续`);
+                aborted = msg;
+                break;
+              }
+              if (i < 3 && !dailyStop) await sleep(900);
             }
-            if (i < 3 && !dailyStop) await sleep(900);
+          } finally {
+            magicRunning = wasMagicBusy;
           }
-          const t = `刮刮乐 成功 ${ok} / 失败 ${fail}` + (gain ? ` · 共 ${fmt(gain)} 股` : '') + (value ? ` · 约 ₵${fmt(value)}` : '');
+          const t = `刮刮乐 成功 ${ok} / 失败 ${fail}` + (aborted ? '（已中断）' : '') + (gain ? ` · 共 ${fmt(gain)} 股` : '') + (value ? ` · 约 ₵${fmt(value)}` : '');
           dailyLogLine('tgtk-log-sum', t);
           if (fail) bad++;
           done++;
@@ -10334,14 +10732,16 @@
         S.logDays = num(lDays.value) || 7;
       }
       persist();
-      if (logAll.length) scanLogs();
+      // 换范围一律重算：现在有增量缓存，命中缓存基本只发 1 个请求，
+      // 不会再像以前那样改个日期就把几十页重拉一遍
+      scanLogs();
     });
     [lFrom, lTo].forEach((inp) =>
       inp.addEventListener('change', () => {
         S.logFrom = lFrom.value || '';
         S.logTo = lTo.value || '';
         persist();
-        if (logAll.length) scanLogs();
+        scanLogs();
       })
     );
     lDir.addEventListener('change', () => {
@@ -12202,6 +12602,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return pop;
   }
 
+  /** 同一角色的 gxData 请求（cid → Promise）：让并发调用去「等」同一个请求，而不是各自拿旧缓存返回 */
+  const gxInflight = Object.create(null);
+
   /**
    * 拉角色页增强所需数据：
    *  - base ：可拍卖信息（底价 / 本轮拍卖总量）来自 chara/user/{id}/tinygrail/false
@@ -12211,31 +12614,48 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   async function gxData(cid, force) {
     const c = GX.cache[cid];
     if (!force && c && Date.now() - c.at < 60000) return c;
-    if (GX.busy === cid) return c || null;
+    /* 同一角色已经有一次请求在飞：后来的调用要**等它**，不能拿着旧缓存（可能压根是空的）直接返回。
+       以前这里 `if (GX.busy === cid) return c || null` —— 页面自己的 tick 正在读这个角色时点开竞拍，
+       就会拿空缓存画出来，于是「底价 ₵0.00、价格框空着」，等那次请求回来再点一次才对。 */
+    if (gxInflight[cid]) {
+      let waited = null;
+      try { waited = await gxInflight[cid]; } catch (e) {}
+      if (waited) return waited;
+      // 那次抛错了才自己再试一次；非强制刷新就先用缓存（哪怕是空的）
+      if (!force) return GX.cache[cid] || null;
+    }
+    const job = (async () => {
+      const out = { at: Date.now(), base: null, bid: null, temples: null };
+      try {
+        const v = await api(`chara/user/${cid}/tinygrail/false`);
+        if (v) out.base = { price: num(v.Price), amount: num(v.Amount) };
+      } catch (e) {}
+      try {
+        // 本周竞拍：[{ State: 竞拍人数, Type: 已拍股数, Price/Amount: 我的 }]
+        const v = await api('chara/auction/list', { method: 'POST', body: JSON.stringify([Number(cid)]) });
+        const arr = Array.isArray(v) ? v : (v && v.Items) || [];
+        const row = arr[0] || null;
+        out.bid = row
+          ? { users: num(row.State), filled: num(row.Type), price: num(row.Price), amount: num(row.Amount) }
+          : { users: 0, filled: 0, price: 0, amount: 0 };
+      } catch (e) {}
+      try {
+        // 旧版圣殿列表本来就不显示 LINK 塔：这里不能并 chara/links，
+        // 否则「各级圣殿数量」会比页面上看到的塔多出一截。
+        const v = await api(`chara/temple/${cid}`);
+        out.temples = Array.isArray(v) ? v : (v && v.Items) || [];
+      } catch (e) {}
+      GX.cache[cid] = out;
+      return out;
+    })();
+    gxInflight[cid] = job;
     GX.busy = cid;
-    const out = { at: Date.now(), base: null, bid: null, temples: null };
     try {
-      const v = await api(`chara/user/${cid}/tinygrail/false`);
-      if (v) out.base = { price: num(v.Price), amount: num(v.Amount) };
-    } catch (e) {}
-    try {
-      // 本周竞拍：[{ State: 竞拍人数, Type: 已拍股数, Price/Amount: 我的 }]
-      const v = await api('chara/auction/list', { method: 'POST', body: JSON.stringify([Number(cid)]) });
-      const arr = Array.isArray(v) ? v : (v && v.Items) || [];
-      const row = arr[0] || null;
-      out.bid = row
-        ? { users: num(row.State), filled: num(row.Type), price: num(row.Price), amount: num(row.Amount) }
-        : { users: 0, filled: 0, price: 0, amount: 0 };
-    } catch (e) {}
-    try {
-      // 旧版圣殿列表本来就不显示 LINK 塔：这里不能并 chara/links，
-      // 否则「各级圣殿数量」会比页面上看到的塔多出一截。
-      const v = await api(`chara/temple/${cid}`);
-      out.temples = Array.isArray(v) ? v : (v && v.Items) || [];
-    } catch (e) {}
-    GX.cache[cid] = out;
-    if (GX.busy === cid) GX.busy = '';
-    return out;
+      return await job;
+    } finally {
+      if (gxInflight[cid] === job) delete gxInflight[cid];
+      if (GX.busy === cid) GX.busy = '';
+    }
   }
 
   /** 圣殿等级只看「固定资产上限」：上限 500 = 1 级，2500 = 2 级，12500 = 3 级。
@@ -13933,7 +14353,18 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
   function gxOpenBid(rec, anchor) {
     const cid = rec.cid;
     const data = GX.cache[cid] || {};
-    const base = (data.base && data.base.price) || 0;
+    /* 底价是接口给的原始浮点（例如 50.3042572283150），站点显示的是两位小数（₵50.30）。
+       默认出价改用「看到的那两位小数」，别让玩家对着一串没意义的小数。
+       但两位小数可能比真实底价低一点点（50.30 < 50.3042），那就上抬一分到 50.31 ——
+       站点自己的弹窗用 Math.ceil(chara.Price) 直接取到整数 51，就是怕这个；
+       抬一分既能保持两位小数，又不会被判「出价不能低于底价」。 */
+    const bidBase = (v) => {
+      const x = num(v);
+      if (!(x > 0)) return 0;
+      const shown = Math.round(x * 100) / 100;
+      return shown + 1e-9 >= x ? shown : Math.round(shown * 100 + 1) / 100;
+    };
+    const base = bidBase(data.base && data.base.price);
     const pop = gxPop(`股权拍卖 · ${gxCharLabel(cid)}`, anchor, { center: true, wide: true });
 
     const hint = h('div', { class: 'tgtk-histsum' }, '读取中…');
@@ -13953,6 +14384,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       value: initPrice ? String(initPrice) : '',
       title: '出价（不能低于底价）',
     });
+    // 玩家自己改过价格就不再拿默认值去覆盖他（底价可能是后来才读到的）
+    let priceTouched = false;
     const amountIn = h('input', {
       type: 'number',
       min: '1',
@@ -13965,11 +14398,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       sum.textContent = '合计 -₵' + fmt(num(priceIn.value) * num(amountIn.value), 2);
     };
 
-    const fill = () => {
+    const fill = (failed) => {
       const d = GX.cache[cid] || {};
       const b = d.bid || null;
       const t = (d.base && d.base.amount) || 0;
-      const baseP = (d.base && d.base.price) || 0;
+      const baseP = bidBase(d.base && d.base.price);
+      /* 一条拍卖信息都没读到（刚打开页面就点竞拍、或者那次请求失败）：
+         别画成「底价 ₵0.00」，那会让人以为这轮底价真是 0。先说清楚状态，
+         等数据到了再由下面的分支把默认价补上。 */
+      if (!d.base && !d.bid) {
+        hint.title = '';
+        hint.textContent = failed
+          ? '读不到拍卖信息（未登录 / 网络问题），可以手动填价格和数量再试'
+          : '正在读取底价…';
+        return;
+      }
       if (baseP) priceIn.setAttribute('min', String(baseP));
       numSpan.textContent = '';
       if (b) {
@@ -13985,10 +14428,17 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       hint.textContent = t
         ? `底价 ₵${fmt(baseP, 2)} · 拍卖总量 ${fmt(t)} 股 · 待拍 ${fmt(Math.max(0, t - ((b && b.filled) || 0)))} 股`
         : `底价 ₵${fmt(baseP, 2)} · 可拍 0 股 · 萌王投票仍可直接出价`;
+      // 底价被抬过一分时说明一下（否则玩家会奇怪：站点明明显示 50.30）
+      const rawP = num(d.base && d.base.price);
+      hint.title = rawP > 0 && fmt(baseP, 2) !== fmt(rawP, 2) ? `实际底价 ₵${rawP}，出价不能低于它` : '';
       // 提交 / 取消之后回填成最新的「已拍值」，别让输入框停在上一次的手填值上
       if (b && b.price > 0 && b.amount > 0) {
         priceIn.value = String(b.price);
         amountIn.value = String(b.amount);
+        upd();
+      } else if (!priceTouched && baseP) {
+        // 打开时缓存还是空的、底价后来才读到：把默认价补上（玩家已经手填过就不动他）
+        priceIn.value = String(baseP);
         upd();
       }
     };
@@ -14010,7 +14460,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       e.preventDefault();
       const q = b.getAttribute('data-q');
       const d = GX.cache[cid] || {};
-      const baseP = (d.base && d.base.price) || 0;
+      const baseP = bidBase(d.base && d.base.price);
       const tot = (d.base && d.base.amount) || 0;
       const bd = d.bid || { users: 0, filled: 0, price: 0, amount: 0 };
       const myAll = bd.price > 0 && bd.amount > 0 ? bd.price * bd.amount : 0;
@@ -14030,7 +14480,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       upd();
     });
 
-    priceIn.addEventListener('input', upd);
+    priceIn.addEventListener('input', () => {
+      priceTouched = true;
+      upd();
+    });
     amountIn.addEventListener('input', upd);
     upd();
 
@@ -14066,7 +14519,8 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const refresh = async () => {
       await gxData(cid, true);
-      fill();
+      const d = GX.cache[cid] || {};
+      fill(!d.base && !d.bid);
       const now = gxBox();
       if (now && String(now.cid) === String(cid)) {
         gxDrawAuction(now, GX.cache[cid] || {});
@@ -14089,9 +14543,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         return;
       }
       const baseNow = ((GX.cache[cid] || {}).base || {}).price || base;
-      if (baseNow && price < baseNow) {
+      if (baseNow && price + 1e-9 < baseNow) {
         msg.className = 'tgtk-gxmsg tgtk-gxbad';
-        msg.textContent = `出价不能低于底价 ₵${fmt(baseNow, 2)}。`;
+        // 提示里写「能填的最低值」，而不是原始浮点的两位显示（否则会出现
+        // 「出价不能低于底价 ₵50.30」，而填 50.30 又被拦下来的怪事）
+        msg.textContent = `出价不能低于底价 ₵${fmt(bidBase(baseNow), 2)}。`;
         return;
       }
       // 竞拍是整条覆盖：数量改小等于撤掉差额（周六取消竞拍会扣资金）
@@ -18337,6 +18793,21 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     } catch (e) {}
   }
 
+  /** 我们自己重写了响应体，原始 headers 里的这几个就不再成立了。
+   *  现在之所以没出问题，是因为浏览器对本地构造的 Response 不较真；
+   *  但带着 content-length / content-encoding 去喂一个长度已经变了的正文，属于赌运气。 */
+  function pinCleanHeaders(win, r) {
+    try {
+      const hs = new win.Headers(r.headers);
+      ['content-length', 'content-encoding', 'transfer-encoding'].forEach((k) => {
+        try { hs.delete(k); } catch (e) {}
+      });
+      return hs;
+    } catch (e) {
+      return r.headers;
+    }
+  }
+
   /** 给一个 window 装钩子：fetch 和 XMLHttpRequest */
   function pinInstallWin(win) {
     if (!win) return;
@@ -18371,7 +18842,10 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
                     }
                     const out = pinRewriteText(txt, url);
                     if (out === null || typeof win.Response !== 'function') return r;
-                    return new win.Response(out, { status: r.status, statusText: r.statusText, headers: r.headers });
+                    return new win.Response(out, {
+                      status: r.status, statusText: r.statusText,
+                      headers: pinCleanHeaders(win, r),
+                    });
                   })
                   .catch(() => r);
               } catch (e) {
@@ -19866,9 +20340,11 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     return locateGrids(d).length > 0 || locateHosts(d).length > 0;
   }
   function locateHasAny() {
-    // 只认「个人圣殿弹窗」：乐园首页背景里的通天塔网格也是塔卡，
+    // 只认「个人圣殿页」：乐园首页背景里的通天塔网格也是塔卡，
     // 用它判断会让横幅在没有个人页的页面上冒出来。
     if (locatePanelRoot()) return true;
+    // 旧版个人页：有那套 tab + .temple_list 才算
+    if (locateOldRoot()) return true;
     return !!locateGridAny();
   }
 
@@ -20101,7 +20577,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       locatePending = { cid: '', at: 0 };
       return;
     }
-    if (!locateGridAny()) return;
+    if (!locateGridAny() && !locateOldRoot()) return;
     locatePendingBusy = true;
     const id = locatePending.cid;
     locatePending = { cid: '', at: 0 };
@@ -20166,6 +20642,47 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
       }
     } catch (e) {}
     return null;
+  }
+  /** 把当前定位名单里**所有**卡片的角色名一起标粉。
+   *  站点重拉一页会把卡片整块换成新节点，原来那几座的粉色一起没了 —— 只补当前这一座的话，
+   *  其余几座要等下一轮 tick（~1 秒）才回粉，看着就是「闪一下变黑又变粉」（v2.3.92 反馈）。 */
+  function locateMarkAll(d) {
+    const loc = pinLocateGet();
+    if (!loc) return null;
+    const list = loc.cids || [];
+    let first = null;
+    for (let i = 0; i < list.length; i++) {
+      let one = null;
+      try { one = locateCardOf(d, list[i]); } catch (e) {}
+      if (!one) continue;
+      if (!first) first = one;
+      try {
+        const el = locateNameOf(one);
+        if (el && !el.classList.contains('tgtk-locate-name')) el.classList.add('tgtk-locate-name');
+      } catch (e) {}
+    }
+    return first;
+  }
+  function locateMarkAllDocs() {
+    for (const d of allDocs()) {
+      try { locateMarkAll(d); } catch (e) {}
+    }
+  }
+  /** 定位期间临时盯一下这块列表：站点换页是整块重建，观察器回调在微任务里，
+   *  赶在浏览器绘制前把粉色补回去，肉眼就看不到「变黑」那一帧。6 秒后自己撤掉。 */
+  let locateMo = null;
+  function locateWatchOnce(el, ms) {
+    try {
+      if (locateMo) { try { locateMo.disconnect(); } catch (e) {} locateMo = null; }
+      if (!el || !el.ownerDocument) return;
+      const doc = el.ownerDocument;
+      const mo = new MutationObserver(() => { try { locateMarkAll(doc); } catch (e) {} });
+      mo.observe(el, { childList: true, subtree: true });
+      locateMo = mo;
+      setTimeout(() => {
+        try { if (locateMo === mo) { mo.disconnect(); locateMo = null; } } catch (e) {}
+      }, ms || 6000);
+    } catch (e) {}
   }
   /** 给目标卡片加醒目描边 + 滚到视野里（只滚一次，别每轮 tick 抢滚动） */
   function locateTick(d) {
@@ -20310,6 +20827,9 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
           starMapLoad(owner);
         }
         d.querySelectorAll('#grail .grail_list .item, #grail .temple_list .item').forEach((card) => {
+          // 旧版四个 tab 都用 ul.grail_list：连接（LINK）/ 人物 / ICO 的卡不是圣殿卡，
+          // 挂上「置顶」按钉会变成「点了没反应」，得排掉（v2.3.92 真机反馈）
+          if (card.closest && card.closest('.link_list, .chara_list, .init_list')) return;
           const cid = starCidOf(card);
           if (cid) pinPillFor(card, cid);
           // 塔卡里那枚收益率（.buff）改成星之力（只在本机显示，不动站点数据）
@@ -22094,7 +22614,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
 
     const fab = h(
       'button',
-      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.90（Alt+T）· 可拖动，双击复位' },
+      { id: 'tgtk-fab', type: 'button', title: '小圣杯工具箱 v2.3.96（Alt+T）· 可拖动，双击复位' },
       '工具箱'
     );
     fab.addEventListener('click', () => {
@@ -22187,7 +22707,7 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
     const testing = location.protocol === 'file:' || /(?:^|[?&])tgtk-test=1/.test(location.search);
     if (testing) {
       HWIN.__TGTK_T__ = {
-        ver: '2.3.90', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
+        ver: '2.3.96', TGGC, gcOpen, gcFrame, gcClose, gcCoverUrl, gcLinkPair,
         gcBind, gcClear, gcApplyAll, gcCoverCount, tgCropOpen, tgCropClose,
         cropState: () => (TGT.crop && TGT.crop.st) || null,
         // 旧版圣殿卡的星之力胶囊：离线测「找 .buff → 换数字 / 换色 / 还原」
@@ -22230,10 +22750,47 @@ html[data-theme="dark"] .tgtk-div-msg{color:#727b8d}
         pinLocateGet, pinLocateSet, pinLocateClear, pinLocateHas, pinOrdered, pinOn, locateTick, locateCardOf,
         locateRefreshBtns, templeLiveRefresh, templeLiveOld, locateCurrentPage, pinToggle, botToggle, gcApplyOld,
         locateFindCard, locateHosts, locateReopenPop, locateRun,
+        locateOldRoot, locateOldKick, locateRunOld, locateHasAny, locateMarkAll, pinDecorTick,
         locateGrids, locateGridAny, locateCardAny, locateHasAny,
         pinPageCids: (pg) => (pinPages[pg] && pinPages[pg].items ? pinPages[pg].items.map((x) => String(x.CharacterId)) : null),
         pinAllReset: () => { pinAll.at = 0; pinAll.items = null; pinAll.busy = null; pinAll.failAt = 0; pinAll.user = ''; },
         pinLists: () => ({ pins: pinList(), bots: botList(), on: !!TUI.on }),
+        // v2.3.93：健壮性那几处（持仓完整性 / 响应头 / 道具重试 / ICO 锁 / 星光目标顺序）
+        fetchAllHoldings, refreshSdTarget, postMagic, pinCleanHeaders, icoWithLock,
+        sdTargetInfo: () => sdTargetInfo,
+        sdSetInfo: (o) => { sdTargetInfo = o; },
+        // 面板是懒构建的（点悬浮球才建），离线测星光目标要能直接设 S.sdTarget
+        sdSetTarget: (v) => { S.sdTarget = String(v || ''); persist(); },
+        scanHoldings, togglePanel,
+        holdState: () => ({ n: holdAll.length, at: holdAt }),
+        holdStatus: () => (els ? els.holdStat.textContent : ''),
+        // v2.3.94：账本增量统计（同一范围重扫只补头部增量）
+        scanLogs,
+        logState: () => ({
+          n: logAll.length,
+          cached: logCache ? logCache.items.length : 0,
+          coveredFrom: logCache ? logCache.coveredFrom : 0,
+          truncated: logCache ? !!logCache.truncated : false,
+          pages: logCache ? logCache.pages : 0,
+        }),
+        logSetRange: (from, to, days) => {
+          S.logDays = days === undefined ? 'custom' : days;
+          if (from !== undefined) S.logFrom = from;
+          if (to !== undefined) S.logTo = to;
+        },
+        logClearCache: () => { logCache = null; logAll = []; },
+        logStatus: () => (els ? els.logStat.textContent : ''),
+        magicRun: runMagic,
+        magicSetTimes: (mode, n) => {
+          S.mTimesBy = Object.assign({}, S.mTimesBy, { [mode]: Math.max(1, Math.floor(num(n) || 1)) });
+        },
+        magicSetChars: (from, to) => { S.mFrom = from || ''; S.mTo = to || ''; },
+        // v2.3.94：旧版竞拍默认价（不再填 50.3042572283150 这种原始浮点）
+        gxOpenBid,
+        gxData,
+        gxCacheSet: (cid, o) => { GX.cache[cid] = o; },
+        gxBidPop: () => document.getElementById('tgtk-gxpop'),
+        gxHidePop,
       };
     }
   } catch (e) {}
